@@ -1,0 +1,84 @@
+===========================
+ICELAND-DB GIT WORKFLOW
+===========================
+
+This project uses GitHub as the single source of truth.
+NEVER copy folders manually again.
+
+---------------------------------
+NORMAL DAILY WORKFLOW
+---------------------------------
+
+When you change files on THIS machine:
+
+1) Open PowerShell in:
+   C:\Users\jfa10\OneDrive - Flutter UK&I\Desktop\iceland-db
+
+2) Run:
+
+   git status
+   git add .
+   git commit -m "what I changed"
+   git push
+
+This uploads your changes to GitHub.
+
+---------------------------------
+
+On your OTHER machine:
+
+1) Open PowerShell in:
+   C:\Users\jfa10\OneDrive - Flutter UK&I\Desktop\iceland-db
+
+2) Run:
+
+   git pull
+
+Now both machines are identical.
+
+---------------------------------
+CHECK BEFORE RUNNING SCRIPTS
+---------------------------------
+
+Always run:
+
+   git status
+
+If you see:
+
+   working tree clean
+
+You are running the official correct version.
+
+---------------------------------
+EMERGENCY RESET (undo everything)
+---------------------------------
+
+If something is broken locally:
+
+   git restore .
+   git clean -fd
+
+This resets your folder back to the last good GitHub version.
+
+---------------------------------
+IGNORING JUNK FILES
+---------------------------------
+
+Add these to .gitignore:
+
+   *.html
+   *.log
+   node_modules/
+   .env
+
+---------------------------------
+REMEMBER
+---------------------------------
+
+Change → add → commit → push  
+Other PC → pull
+
+---------------------------------
+END
+---------------------------------
