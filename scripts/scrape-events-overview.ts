@@ -1,3 +1,4 @@
+// scripts/scrape-events-overview.ts
 import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
 import * as cheerio from "cheerio";
@@ -25,6 +26,7 @@ const sleepMs = Number(arg("--sleep") ?? "250");
 const limit = Number(arg("--limit") ?? "0"); // 0 = unlimited
 const dry = process.argv.includes("--dry");
 const debug = process.argv.includes("--debug");
+const replace = process.argv.includes("--replace");
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -56,66 +58,34 @@ function getParamId(href: string | null | undefined, key = "id"): string | null 
   return m ? m[1] : null;
 }
 
-// minute formats like: 22´ , 90+2´
-function extractMinute(text: string): { minute: number | null; stoppage: number | null } {
-  const t = clean(text);
-  const m = t.match(/(\d{1,3})(?:\s*\+\s*(\d{1,2}))?\s*[´'’]/);
-  if (!m) return { minute: null, stoppage: null };
-  const minute = Number(m[1]);
-  const stoppage = m[2] ? Number(m[2]) : null;
-  return { minute: Number.isFinite(minute) ? minute : null, stoppage };
+async function fetchMatchesInRange(fromYear: number, toYear: number) {
+  const pageSize = 1000;
+  let from = 0;
+  const all: any[] = [];
+
+  while (true) {
+    const { data, error } = await supabase
+      .from("matches")
+      .select("ksi_match_id, season_year, home_team_ksi_id, away_team_ksi_id")
+      .gte("season_year", fromYear)
+      .lte("season_year", toYear)
+      .order("ksi_match_id", { ascending: true })
+      .range(from, from + pageSize - 1);
+
+    if (error) throw new Error(error.message);
+
+    const batch = data ?? [];
+    all.push(...batch);
+
+    if (batch.length < pageSize) break; // done
+    from += pageSize;
+  }
+
+  return all;
 }
 
-function removeMinuteToken(s: string) {
-  return s
-    .replace(/(\d{1,3})(?:\s*\+\s*\d{1,2})?\s*[´'’]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
 
-function detectEventTypeFromIcons($: cheerio.CheerioAPI, $el: cheerio.Cheerio<any>, playerCount: number): string | null {
-  const hasYellow =
-    $el.find("div[style*='FAC83C']").length > 0 ||
-    $el
-      .find("div")
-      .toArray()
-      .some((d) => /bg-\[#FAC83C\]/i.test(clean($(d).attr("class"))) || /FAC83C/i.test(clean($(d).attr("style"))));
-
-  if (hasYellow) return "yellow";
-  if (playerCount >= 2) return "substitution";
-
-  const iconHtml = clean(
-    $el
-      .find("svg, img")
-      .toArray()
-      .map((n) => clean($.html(n) ?? ""))
-      .join(" "),
-  );
-
-  if (/#DD3636/i.test(iconHtml)) return "red";
-
-  const hasSvg = $el.find("svg").length > 0;
-  if (playerCount === 1 && hasSvg) return "goal";
-
-  return null;
-}
-
-function normaliseEventType(text: string, iconHints: string[], playerCount: number): string {
-  const t = clean(text).toLowerCase();
-  const h = clean(iconHints.join(" ")).toLowerCase();
-  const all = `${t} ${h}`;
-
-  if (playerCount >= 2) return "substitution";
-  if (/(sjálfsmark|sjalfsmark|own goal)/i.test(all)) return "own_goal";
-  if (/(víti|viti|penalty)/i.test(all)) return "penalty";
-  if (/(mark|goal)/i.test(all)) return "goal";
-  if (/(seinna gult|second yellow)/i.test(all)) return "second_yellow";
-  if (/(gult|yellow)/i.test(all)) return "yellow";
-  if (/(rautt|red)/i.test(all)) return "red";
-
-  return "unknown";
-}
-
+// ---------- Types ----------
 type EventRow = {
   ksi_match_id: string;
   event_idx: number;
@@ -124,216 +94,231 @@ type EventRow = {
   event_type: string;
   ksi_team_id: string | null;
 
-  // single-player events (goal/card/etc)
+  // single-player events
   ksi_player_id: string | null;
   player_name: string | null;
 
-  // substitutions only (what you want)
+  // substitutions
   sub_on_ksi_player_id: string | null;
   sub_off_ksi_player_id: string | null;
   sub_on_name: string | null;
   sub_off_name: string | null;
 
-  notes: string | null;
   raw: any;
 };
 
-function findEventsGrid($: cheerio.CheerioAPI): cheerio.Cheerio<any> | null {
-  const grids = $("div.grid.grid-cols-2, div.grid.l\\:grid-cols-2, div.grid").toArray();
+// ---------- Find the correct Atburðir container (your HTML) ----------
+function findAtburdirGrid(c: cheerio.CheerioAPI): cheerio.Cheerio<any> | null {
+  // find the "Atburðir" label span
+  const $label = c("span")
+    .filter((_, el) => clean(c(el).text()).toLowerCase() === "atburðir")
+    .first();
 
-  const hasMinute = (root: cheerio.Cheerio<any>) =>
-    root
-      .find("*")
+  if ($label.length) {
+    // the grid is the next div with grid-cols-[1fr_auto_1fr]
+    const $grid = $label
+      .closest("div")
+      .nextAll("div")
+      .filter((_, el) => {
+        const cls = clean(c(el).attr("class"));
+        return cls.includes("grid") && cls.includes("grid-cols-[1fr_auto_1fr]");
+      })
+      .first();
+
+    if ($grid.length) return $grid;
+  }
+
+  // fallback: any grid-cols-[1fr_auto_1fr] on page
+  const $fallback = c("div")
+    .filter((_, el) => {
+      const cls = clean(c(el).attr("class"));
+      return cls.includes("grid") && cls.includes("grid-cols-[1fr_auto_1fr]");
+    })
+    .first();
+
+  return $fallback.length ? $fallback : null;
+}
+
+// ---------- Minute + stoppage from the minute bubble ----------
+function parseMinuteFromRow(c: cheerio.CheerioAPI, $row: cheerio.Cheerio<any>) {
+  // minute bubble has: div.relative {minute}<span>’</span> and optionally a small span with stoppage number
+  const $bubble = $row
+    .find("div.relative")
+    .filter((_, el) => {
+      const t = clean(c(el).text());
+      // should contain a number + a ’ somewhere
+      return /\d{1,3}/.test(t) && /’/.test(t);
+    })
+    .first();
+
+  // fallback if not found
+  const txt = clean($row.text());
+  const m = txt.match(/(\d{1,3})(?:\s*’\s*|\s*’)?/);
+  const minute = m ? Number(m[1]) : NaN;
+  if (!Number.isFinite(minute)) return { minute: null as number | null, stoppage: null as number | null };
+
+  // stoppage number is usually a separate small bubble span (text "2")
+  const $stop = $row.find("span.text-\\[10rem\\]").first();
+  const stoppage = $stop.length && /^\d{1,2}$/.test(clean($stop.text())) ? Number(clean($stop.text())) : null;
+
+  return { minute, stoppage };
+}
+
+// ---------- Event type from icon ----------
+function detectEventType(c: cheerio.CheerioAPI, $event: cheerio.Cheerio<any>, playerCount: number): string {
+  // yellow card: contains bg-[#FAC83C]
+  if ($event.find("div.bg-\\[\\#FAC83C\\], div[style*='FAC83C']").length) return "yellow";
+
+  // substitution: the arrow svg has both green and red strokes
+  const svgHtml = clean(
+    $event
+      .find("svg")
       .toArray()
-      .some((n) => /\d{1,3}(?:\s*\+\s*\d{1,2})?\s*[´'’]/.test(clean($(n).text())));
+      .map((n) => clean(c.html(n) ?? ""))
+      .join(" "),
+  );
+  if (/#1A7941/i.test(svgHtml) && /#DD3636/i.test(svgHtml)) return "substitution";
 
-  for (const g of grids) {
-    const $g = $(g);
-    const children = $g.children().toArray();
-    if (children.length < 2) continue;
+  // goal: the ball icon svg is present for single-player events
+  if (playerCount === 1 && $event.find("svg").length) return "goal";
 
-    const $c1 = $(children[0]);
-    const $c2 = $(children[1]);
-
-    const c1ok = $c1.find("a[href^='/leikmenn/leikmadur?id=']").length > 0 || hasMinute($c1);
-    const c2ok = $c2.find("a[href^='/leikmenn/leikmadur?id=']").length > 0 || hasMinute($c2);
-    if (!c1ok || !c2ok) continue;
-
-    const aroundText = clean(
-      $g
-        .prevAll()
-        .slice(0, 8)
-        .toArray()
-        .map((n) => clean($(n).text()))
-        .join(" "),
-    );
-
-    const selfText = clean($g.text());
-    if (/atburðir/i.test(aroundText + " " + selfText)) return $g;
-  }
-
-  // fallback: first 2-col grid with enough minute markers
-  for (const g of grids) {
-    const $g = $(g);
-    const kids = $g.children().toArray();
-    if (kids.length < 2) continue;
-    const $c1 = $(kids[0]);
-    const $c2 = $(kids[1]);
-    const c1min = $c1.text().match(/\d{1,3}(?:\s*\+\s*\d{1,2})?\s*[´'’]/g)?.length ?? 0;
-    const c2min = $c2.text().match(/\d{1,3}(?:\s*\+\s*\d{1,2})?\s*[´'’]/g)?.length ?? 0;
-    if (c1min >= 2 && c2min >= 2) return $g;
-  }
-
-  return null;
+  return "unknown";
 }
 
-function parseEventsFromColumn(
-  $: cheerio.CheerioAPI,
-  $col: cheerio.Cheerio<any>,
-  columnTeamId: string | null,
-  playerToTeam: Map<string, string>,
-): Omit<EventRow, "event_idx" | "ksi_match_id">[] {
-  const out: Omit<EventRow, "event_idx" | "ksi_match_id">[] = [];
-  const candidates = new Set<any>();
-
-  // anchor parent blocks are usually best
-  $col.find("a[href^='/leikmenn/leikmadur?id=']").each((_, a) => {
-    const $a = $(a);
-    const $row = $a.closest("div, li, tr");
-    if ($row.length) candidates.add($row.get(0));
-  });
-
-  // include icon rows even if no player link
-  $col.find("div, li, tr").each((_, el) => {
-    const $el = $(el);
-    const text = clean($el.text());
-    if (!text) return;
-    if (text.length > 220) return;
-    if (!/\d{1,3}(?:\s*\+\s*\d{1,2})?\s*[´'’]/.test(text)) return;
-    const hasIcon = $el.find("svg, img").length > 0;
-    const hasPlayer = $el.find("a[href^='/leikmenn/leikmadur?id=']").length > 0;
-    if (hasIcon || hasPlayer) candidates.add(el);
-  });
-
-  const seen = new Set<string>();
-
-  for (const el of candidates) {
-    const $el = $(el);
-    const rawText = clean($el.text());
-    if (!rawText) continue;
-    if (rawText.length > 220) continue;
-    if (/(byrjunarlið|varamenn|liðstjórn|dómarar|innbyrðis|staða|leikskýrsla)/i.test(rawText)) continue;
-
-    const { minute, stoppage } = extractMinute(rawText);
-    if (minute === null) continue;
-
-    const playerLinks = $el.find("a[href^='/leikmenn/leikmadur?id=']").toArray();
-    const playerCount = playerLinks.length;
-
-    // KSI overview ordering seems to be: sub ON first, sub OFF second (but we’ll keep this stable)
-    const p1 = playerLinks[0] ? getParamId($(playerLinks[0]).attr("href"), "id") : null;
-    const p2 = playerLinks[1] ? getParamId($(playerLinks[1]).attr("href"), "id") : null;
-
-    const n1 = playerLinks[0] ? clean($(playerLinks[0]).text()) : null;
-    const n2 = playerLinks[1] ? clean($(playerLinks[1]).text()) : null;
-
-    const iconHints: string[] = [];
-    $el.find("[title], img[alt], img[title], svg[title]").each((_, node) => {
-      const a = clean($(node).attr("alt"));
-      const b = clean($(node).attr("title"));
-      if (a) iconHints.push(a);
-      if (b) iconHints.push(b);
-    });
-
-    let eventType = normaliseEventType(rawText, iconHints, playerCount);
-    if (eventType === "unknown") {
-      const iconType = detectEventTypeFromIcons($, $el, playerCount);
-      if (iconType) eventType = iconType;
-    }
-
-    // team assignment: use player->team first, otherwise columnTeamId
-    const teamId =
-      (p1 && playerToTeam.get(p1)) ||
-      (p2 && playerToTeam.get(p2)) ||
-      columnTeamId ||
-      null;
-
-    // notes: remove minute tokens + player names
-    let notes: string | null = removeMinuteToken(rawText);
-    for (const pl of playerLinks) {
-      const nm = clean($(pl).text());
-      if (nm) notes = clean((notes ?? "").replace(nm, " "));
-    }
-    notes = clean((notes ?? "").replace(/[’'´]/g, " "));
-    notes = clean(notes);
-    if (!notes || /^[,.\-–—]+$/.test(notes)) notes = null;
-
-    const key = [minute, stoppage ?? "", teamId ?? "", p1 ?? "", p2 ?? "", eventType, notes ?? ""].join("|");
-    if (seen.has(key)) continue;
-    seen.add(key);
-
-    // Build row:
-    // - substitutions: use sub_on/sub_off, leave ksi_player_id/player_name null
-    // - everything else: use ksi_player_id/player_name (take first player if present)
-    const isSub = eventType === "substitution";
-
-    out.push({
-      minute,
-      stoppage,
-      event_type: eventType,
-      ksi_team_id: teamId,
-
-      ksi_player_id: isSub ? null : p1,
-      player_name: isSub ? null : (n1 || null),
-
-      sub_on_ksi_player_id: isSub ? p1 : null,
-      sub_off_ksi_player_id: isSub ? p2 : null,
-      sub_on_name: isSub ? (n1 || null) : null,
-      sub_off_name: isSub ? (n2 || null) : null,
-
-      notes,
-      raw: {
-        text: rawText,
-        iconHints,
-        player_names: playerLinks.map((x) => clean($(x).text())),
-      },
-    });
-  }
-
-  return out;
-}
-
-function parseOverviewEvents(
-  $: cheerio.CheerioAPI,
+// ---------- Parse events ----------
+function parseOverviewEventsFromHtml(
+  c: cheerio.CheerioAPI,
   ksiMatchId: string,
   homeTeamId: string | null,
   awayTeamId: string | null,
   playerToTeam: Map<string, string>,
 ): EventRow[] {
-  const $grid = findEventsGrid($);
+  const $grid = findAtburdirGrid(c);
   if (!$grid) return [];
 
-  const kids = $grid.children().toArray();
-  const $homeCol = $(kids[0]);
-  const $awayCol = $(kids[1]);
+  // each event is a match-event div
+  const $events = $grid.find("div.match-event[data-event-id]").toArray();
 
-  const homeRaw = parseEventsFromColumn($, $homeCol, homeTeamId, playerToTeam);
-  const awayRaw = parseEventsFromColumn($, $awayCol, awayTeamId, playerToTeam);
+  const out: EventRow[] = [];
+  const seen = new Set<string>();
 
-  const merged: EventRow[] = [];
-  let eventIdx = 0;
+  for (const ev of $events) {
+    const $ev = c(ev);
 
-  for (const e of [...homeRaw, ...awayRaw]) {
-    merged.push({
-      ...e,
+    // the whole "row" is the nearest col-span-3 wrapper
+    const $row = $ev.closest("div.col-span-3");
+    if (!$row.length) continue;
+
+    // home rows in your HTML have flex-row-reverse on the wrapper
+    const rowCls = clean($row.attr("class"));
+    const isHomeSide = rowCls.includes("flex-row-reverse");
+    const columnTeamId = isHomeSide ? homeTeamId : awayTeamId;
+
+    const { minute, stoppage } = parseMinuteFromRow(c, $row);
+    if (minute == null) continue;
+
+    const playerLinks = $ev.find("a[href^='/leikmenn/leikmadur?id=']").toArray();
+    const playerCount = playerLinks.length;
+
+    // get ids/names in DOM order
+    const ids = playerLinks.map((a) => getParamId(c(a).attr("href"), "id"));
+    const names = playerLinks.map((a) => clean(c(a).text()));
+
+    // type
+    const eventType = detectEventType(c, $ev, playerCount);
+
+    // team assignment: prefer lineup mapping by player id
+    const teamId =
+      (ids[0] && playerToTeam.get(String(ids[0]))) ||
+      (ids[1] && playerToTeam.get(String(ids[1]))) ||
+      columnTeamId ||
+      null;
+
+    // substitutions: choose on/off by green/red class (your HTML uses text-[#1A7941] and text-[#D80707])
+    let subOnId: string | null = null;
+    let subOffId: string | null = null;
+    let subOnName: string | null = null;
+    let subOffName: string | null = null;
+
+    if (eventType === "substitution") {
+      const $green = $ev.find("a.text-\\[\\#1A7941\\]").first();
+      const $red = $ev.find("a.text-\\[\\#D80707\\]").first();
+
+      if ($green.length) {
+        subOnId = getParamId($green.attr("href"), "id");
+        subOnName = clean($green.text()) || null;
+      }
+      if ($red.length) {
+        subOffId = getParamId($red.attr("href"), "id");
+        subOffName = clean($red.text()) || null;
+      }
+
+      // fallback if classes not found
+      if (!subOnId && ids[0]) {
+        subOnId = ids[0];
+        subOnName = names[0] || null;
+      }
+      if (!subOffId && ids[1]) {
+        subOffId = ids[1];
+        subOffName = names[1] || null;
+      }
+    }
+
+    const singlePlayerId = eventType !== "substitution" ? (ids[0] ?? null) : null;
+    const singlePlayerName = eventType !== "substitution" ? (names[0] ?? null) : null;
+
+    const rawText = clean($row.text());
+
+    const key = [
+      minute,
+      stoppage ?? "",
+      eventType,
+      teamId ?? "",
+      singlePlayerId ?? "",
+      subOnId ?? "",
+      subOffId ?? "",
+    ].join("|");
+
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    out.push({
       ksi_match_id: ksiMatchId,
-      event_idx: eventIdx++,
+      event_idx: 0, // set later
+      minute,
+      stoppage,
+      event_type: eventType,
+      ksi_team_id: teamId,
+
+      ksi_player_id: singlePlayerId,
+      player_name: singlePlayerName,
+
+      sub_on_ksi_player_id: eventType === "substitution" ? subOnId : null,
+      sub_off_ksi_player_id: eventType === "substitution" ? subOffId : null,
+      sub_on_name: eventType === "substitution" ? subOnName : null,
+      sub_off_name: eventType === "substitution" ? subOffName : null,
+
+      raw: {
+        text: rawText,
+        event_html: clean(c.html($ev) ?? ""),
+        row_html: clean(c.html($row) ?? ""),
+      },
     });
   }
 
-  return merged;
+  // stable ordering by minute, then team, then type (so event_idx is consistent)
+  out.sort((a, b) => {
+    if (a.minute !== b.minute) return a.minute - b.minute;
+    if ((a.stoppage ?? 0) !== (b.stoppage ?? 0)) return (a.stoppage ?? 0) - (b.stoppage ?? 0);
+    if ((a.ksi_team_id ?? "") !== (b.ksi_team_id ?? "")) return (a.ksi_team_id ?? "").localeCompare(b.ksi_team_id ?? "");
+    return (a.event_type ?? "").localeCompare(b.event_type ?? "");
+  });
+
+  out.forEach((e, i) => (e.event_idx = i));
+  return out;
 }
 
+// ---------- Apply sub minutes to match_lineups ----------
 async function applySubMinutesToLineups(matchId: string, events: EventRow[]) {
   const { data: lineups, error } = await supabase
     .from("match_lineups")
@@ -369,7 +354,7 @@ async function applySubMinutesToLineups(matchId: string, events: EventRow[]) {
   if (!updates.length) return { updated: 0 };
 
   if (dry) {
-    if (debug) console.log("  DRY: would update match_lineups minutes:", updates.slice(0, 20));
+    if (debug) console.log("  DRY: would update match_lineups minutes:", updates.slice(0, 50));
     return { updated: updates.length };
   }
 
@@ -390,23 +375,72 @@ async function applySubMinutesToLineups(matchId: string, events: EventRow[]) {
   return { updated: ok };
 }
 
+// ---------- Only upsert columns that exist ----------
+async function getMatchEventsColumns(): Promise<Set<string>> {
+  // try to read one row to learn column names
+  const { data, error } = await supabase.from("match_events").select("*").limit(1);
+  if (error) {
+    // if table is empty or RLS weirdness, fall back to a safe minimal set
+    return new Set([
+      "ksi_match_id",
+      "event_idx",
+      "minute",
+      "stoppage",
+      "event_type",
+      "ksi_team_id",
+      "ksi_player_id",
+      "player_name",
+      "sub_on_ksi_player_id",
+      "sub_off_ksi_player_id",
+      "sub_on_name",
+      "sub_off_name",
+      "raw",
+    ]);
+  }
+
+  const first = (data ?? [])[0] ?? {};
+  return new Set(Object.keys(first));
+}
+
+function pickAllowed(row: any, allowed: Set<string>) {
+  const out: any = {};
+  for (const k of Object.keys(row)) {
+    if (allowed.has(k)) out[k] = row[k];
+  }
+  return out;
+}
+
+// ---------- Debug print ----------
+function debugPrint(mid: string, events: EventRow[]) {
+  console.log(`  ---- parsed event rows for match ${mid} (${events.length}) ----`);
+  for (const e of events) {
+    const m = `${e.minute}${e.stoppage ? `+${e.stoppage}` : ""}`;
+    const p1 = e.ksi_player_id ?? "-";
+    const on = e.sub_on_ksi_player_id ?? "-";
+    const off = e.sub_off_ksi_player_id ?? "-";
+    console.log(
+      `  idx=${String(e.event_idx).padStart(2)} min=${String(m).padStart(4)} type=${String(e.event_type).padEnd(12)} team=${e.ksi_team_id ?? "-"} p=${p1} on=${on} off=${off} | ${e.raw?.text ?? ""}`,
+    );
+  }
+}
+
 // ---------- Main ----------
 async function main() {
   console.log(`Scrape OVERVIEW events ${fromYear}..${toYear}`);
-  console.log(`Dry: ${dry ? "YES" : "NO"} | sleep=${sleepMs}ms | limit=${limit || "none"} | debug=${debug ? "YES" : "NO"}`);
+  console.log(
+    `Dry: ${dry ? "YES" : "NO"} | sleep=${sleepMs}ms | limit=${limit || "none"} | debug=${debug ? "YES" : "NO"} | replace=${replace ? "YES" : "NO"}`,
+  );
 
-  const { data: matches, error } = await supabase
-    .from("matches")
-    .select("ksi_match_id, season_year, home_team_ksi_id, away_team_ksi_id")
-    .gte("season_year", fromYear)
-    .lte("season_year", toYear);
+  // Fetch matches (paged, no 1000 cap)
+  const matches = await fetchMatchesInRange(fromYear, toYear);
 
-  if (error) throw new Error(error.message);
+  // Apply --limit (0 = no limit)
+  const target = limit && limit > 0 ? matches.slice(0, limit) : matches;
 
-  const all = (matches ?? []) as any[];
-  const target = limit && limit > 0 ? all.slice(0, limit) : all;
+  console.log(`Matches in range: ${matches.length} | processing: ${target.length}`);
 
-  console.log(`Matches in range: ${all.length} | processing: ${target.length}`);
+  // learn columns once
+  const allowedCols = await getMatchEventsColumns();
 
   let ok = 0;
   let fail = 0;
@@ -422,7 +456,7 @@ async function main() {
     console.log(`\n[#${i + 1}/${target.length}] match ${mid} -> ${url}`);
 
     try {
-      // build player -> team mapping from stored lineups
+      // mapping player -> team from stored lineups
       const { data: lineupRows, error: lErr } = await supabase
         .from("match_lineups")
         .select("ksi_player_id, ksi_team_id")
@@ -436,22 +470,29 @@ async function main() {
       }
 
       const html = await fetchHtml(url);
-      const $ = cheerio.load(html);
+      const c = cheerio.load(html);
 
-      const events = parseOverviewEvents($, mid, homeTeamId, awayTeamId, playerToTeam);
+      const events = parseOverviewEventsFromHtml(c, mid, homeTeamId, awayTeamId, playerToTeam);
 
       console.log(`  parsed events: ${events.length}`);
-      if (debug) console.log(`  sample:`, events.slice(0, 10));
+      if (debug) debugPrint(mid, events);
 
       if (dry) {
-        console.log(`  DRY: would upsert events=${events.length}`);
+        console.log(`  DRY: would save events=${events.length}`);
       } else {
+        if (replace) {
+          const { error: delErr } = await supabase.from("match_events").delete().eq("ksi_match_id", mid);
+          if (delErr) throw new Error(`match_events delete failed: ${delErr.message}`);
+        }
+
         if (events.length) {
-          const { error: eErr } = await supabase.from("match_events").upsert(events, {
+          const payload = events.map((e) => pickAllowed(e, allowedCols));
+          const { error: eErr } = await supabase.from("match_events").upsert(payload, {
             onConflict: "ksi_match_id,event_idx",
           });
           if (eErr) throw new Error(`match_events upsert failed: ${eErr.message}`);
         }
+
         console.log(`  ✅ saved events=${events.length}`);
       }
 
