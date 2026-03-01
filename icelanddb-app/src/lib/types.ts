@@ -34,6 +34,7 @@ export type PlayerSeasonRow = {
   goals: number;
   yellows: number;
   reds: number;
+  birth_year?: number | null;
 };
 
 export type LikelyXIPlayer = {
@@ -42,6 +43,7 @@ export type LikelyXIPlayer = {
   minutes: number;
   starts: number;
   goals: number;
+  birth_year?: number | null;
 };
 
 export type MatchPreviewResponse = {

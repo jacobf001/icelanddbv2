@@ -57,6 +57,12 @@ function fmt(n: number | null | undefined) {
   return n.toLocaleString();
 }
 
+function playerSubline(p: LineupPlayer & { birth_year?: number | null }) {
+  if (p.birth_year != null) return String(p.birth_year);
+  return p.ksi_player_id ? String(p.ksi_player_id) : "—";
+}
+
+
 export default function LineupPreviewPage() {
   const [url, setUrl] = useState<string>("https://www.ksi.is/leikir-og-urslit/felagslid/leikur?id=6966621");
   const [seasonYear, setSeasonYear] = useState<number>(2025);
@@ -66,7 +72,7 @@ export default function LineupPreviewPage() {
   const [error, setError] = useState<string | null>(null);
 
   const [parsed, setParsed] = useState<ParsedLineupsResponse | null>(null);
-  const [stats, setStats] = useState<LineupStatsResponse | null>(null);
+  const [stats, setStats] = useState<any>(null);
 
   const seasonMap = useMemo(() => {
     const m = new Map<string, PlayerSeasonRow>();
@@ -86,8 +92,15 @@ export default function LineupPreviewPage() {
 
       // 1) parse lineups
       const pRes = await fetch(`/api/lineups-from-report?url=${encodeURIComponent(u)}`, { cache: "no-store" });
-      const pJson = (await pRes.json()) as any;
-      if (!pRes.ok) throw new Error(pJson?.error ?? `Parse failed (${pRes.status})`);
+      const pText = await pRes.text();
+      let pJson: any = null;
+      try {
+        pJson = pText ? JSON.parse(pText) : null;
+      } catch {
+        // ignore
+      }
+      if (!pRes.ok) throw new Error(pJson?.error ?? `Parse failed (${pRes.status}): ${pText.slice(0, 300)}`);
+      if (!pJson) throw new Error(`Parse failed (${pRes.status}): empty response body`);
 
       setParsed(pJson as ParsedLineupsResponse);
 
@@ -97,18 +110,33 @@ export default function LineupPreviewPage() {
         ...(pJson?.home?.bench ?? []),
         ...(pJson?.away?.starters ?? []),
         ...(pJson?.away?.bench ?? []),
-      ].map((x: any) => String(x.ksi_player_id));
+      ]
+        .map((x: any) => String(x.ksi_player_id))
+        .filter(Boolean);
 
-      const sRes = await fetch(`/api/lineup-stats`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ seasonYear, lastX, playerIds }),
-      });
+      const sRes = await fetch(
+        `/api/lineup-stats?url=${encodeURIComponent(u)}&season=${seasonYear}`,
+        { cache: "no-store" }
+      );
 
-      const sJson = (await sRes.json()) as any;
-      if (!sRes.ok) throw new Error(sJson?.error ?? `Stats failed (${sRes.status})`);
+
+      const sText = await sRes.text();
+
+      let sJson: any = null;
+      try {
+        sJson = sText ? JSON.parse(sText) : null;
+      } catch {
+        // ignore
+      }
+
+      if (!sRes.ok) {
+        throw new Error(sJson?.error ?? `Stats failed (${sRes.status}). Response:\n${sText.slice(0, 500)}`);
+      }
+      if (!sJson) throw new Error(`Stats failed (${sRes.status}). Empty response body.`);
 
       setStats(sJson as LineupStatsResponse);
+      console.log("stats home starters:", sJson?.home?.starters?.slice(0, 2));
+      console.log("stats keys:", Object.keys(sJson ?? {}));
     } catch (e: any) {
       setError(e?.message ?? "Failed");
     } finally {
@@ -144,7 +172,9 @@ export default function LineupPreviewPage() {
                 onChange={(e) => setSeasonYear(Number(e.target.value))}
               >
                 {SEASONS.map((y) => (
-                  <option key={y} value={y}>{y}</option>
+                  <option key={y} value={y}>
+                    {y}
+                  </option>
                 ))}
               </select>
             </div>
@@ -173,15 +203,16 @@ export default function LineupPreviewPage() {
             </div>
           </div>
 
-          {error && <div className="mt-3 text-sm text-red-400">{error}</div>}
+          {error && <div className="mt-3 whitespace-pre-wrap text-sm text-red-400">{error}</div>}
+        
         </div>
 
-        {parsed && (
-          <div className="mt-8 grid grid-cols-1 gap-6 md:grid-cols-2">
-            <LineupBlock title="Home" lineup={parsed.home} seasonMap={seasonMap} recent={stats?.recentAppearances ?? {}} />
-            <LineupBlock title="Away" lineup={parsed.away} seasonMap={seasonMap} recent={stats?.recentAppearances ?? {}} />
-          </div>
-        )}
+      {parsed && (
+        <div className="mt-8 grid grid-cols-1 gap-6 md:grid-cols-2">
+          <LineupBlock title="Home" lineup={(stats as any)?.home ?? parsed.home} seasonMap={seasonMap} recent={stats?.recentAppearances ?? {}} />
+          <LineupBlock title="Away" lineup={(stats as any)?.away ?? parsed.away} seasonMap={seasonMap} recent={stats?.recentAppearances ?? {}} />
+        </div>
+      )}
       </div>
     </main>
   );
@@ -223,7 +254,12 @@ function LineupBlock({
               return (
                 <tr key={p.ksi_player_id} className="border-t border-white/10">
                   <td className="px-3 py-2">{p.shirt_no ?? "—"}</td>
-                  <td className="px-3 py-2">{row?.player_name ?? p.name ?? `Player ${p.ksi_player_id}`}</td>
+                  <td className="px-3 py-2">
+                    <div className="leading-tight">
+                      <div>{row?.player_name ?? p.name ?? `Player ${p.ksi_player_id}`}</div>
+                      <div className="text-xs text-white/50">{playerSubline(p as any)}</div>
+                    </div>
+                  </td>
                   <td className="px-3 py-2 text-right">{fmt(row?.minutes)}</td>
                   <td className="px-3 py-2 text-right">{fmt(row?.starts)}</td>
                   <td className="px-3 py-2 text-right">{fmt(row?.goals)}</td>
@@ -249,14 +285,24 @@ function LineupBlock({
           </thead>
           <tbody>
             {lineup.bench.length === 0 ? (
-              <tr><td colSpan={5} className="px-3 py-3 text-white/60">No bench parsed.</td></tr>
+              <tr>
+                <td colSpan={5} className="px-3 py-3 text-white/60">
+                  No bench parsed.
+                </td>
+              </tr>
             ) : (
               lineup.bench.map((p) => {
                 const row = seasonMap.get(p.ksi_player_id);
+
                 return (
                   <tr key={p.ksi_player_id} className="border-t border-white/10">
                     <td className="px-3 py-2">{p.shirt_no ?? "—"}</td>
-                    <td className="px-3 py-2">{row?.player_name ?? p.name ?? `Player ${p.ksi_player_id}`}</td>
+                    <td className="px-3 py-2">
+                      <div className="leading-tight">
+                        <div>{row?.player_name ?? p.name ?? `Player ${p.ksi_player_id}`}</div>
+                       <div className="text-xs text-white/50">{playerSubline(p as any)}</div>
+                      </div>
+                    </td>
                     <td className="px-3 py-2 text-right">{fmt(row?.minutes)}</td>
                     <td className="px-3 py-2 text-right">{fmt(row?.starts)}</td>
                     <td className="px-3 py-2 text-right">{fmt(row?.goals)}</td>

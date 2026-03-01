@@ -141,6 +141,19 @@ export async function GET(req: Request) {
 
   if (seasonErr) return NextResponse.json({ error: seasonErr.message }, { status: 500 });
 
+  // Fetch birth years from players table
+  const { data: playerBirthRows, error: birthErr } = await supabaseAdmin
+    .from("players")
+    .select("ksi_player_id, birth_year")
+    .in("ksi_player_id", allIds);
+
+  if (birthErr) return NextResponse.json({ error: birthErr.message }, { status: 500 });
+
+  const birthYearById = new Map<string, number | null>();
+  for (const r of playerBirthRows ?? []) {
+    birthYearById.set(String(r.ksi_player_id), r.birth_year ?? null);
+  }
+
   const bestRowByPlayer = new Map<string, any>();
   for (const r of seasonRows ?? []) {
     const id = String((r as any).ksi_player_id);
@@ -242,6 +255,7 @@ export async function GET(req: Request) {
 
     return {
       ...p,
+      birth_year: birthYearById.get(String(p.ksi_player_id)) ?? null,  
       season: r
         ? {
             ksi_team_id: teamId,

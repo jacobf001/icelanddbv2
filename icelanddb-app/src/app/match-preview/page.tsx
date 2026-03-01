@@ -19,7 +19,21 @@ function teamLabel(t: TeamRow) {
   return nm ? `${nm} (${t.ksi_team_id})` : `Team ${t.ksi_team_id}`;
 }
 
+function playerSubline(p: any) {
+  // Show birth year if present; otherwise fall back to the id
+  if (p?.birth_year && Number.isFinite(Number(p.birth_year))) return String(p.birth_year);
+  return p?.ksi_player_id ? String(p.ksi_player_id) : "—";
+}
 
+function PlayerCell({ p }: { p: any }) {
+  const name = p?.player_name ?? p?.name ?? "Unknown player";
+  return (
+    <div className="leading-tight">
+      <div>{name}</div>
+      <div className="text-xs text-white/50">{playerSubline(p)}</div>
+    </div>
+  );
+}
 
 export default function MatchPreviewPage() {
   const [teams, setTeams] = useState<TeamRow[]>([]);
@@ -119,7 +133,7 @@ export default function MatchPreviewPage() {
     <main className="min-h-screen bg-black text-white">
       <div className="mx-auto max-w-6xl px-6 py-10">
         <div className="flex flex-col gap-2">
-          <h1 className="text-3xl font-semibold">Match Preview</h1>
+          <h1 className="text-3xl font-semibold">Match Preview - DEBUG 123</h1>
           <p className="text-white/70">
             Select two teams + season, then preview season-to-date team + player stats and a likely XI.
           </p>
@@ -316,7 +330,9 @@ function TeamPanel({
               ) : (
                 block.likelyXI.slice(0, 11).map((p) => (
                   <tr key={p.ksi_player_id} className="border-t border-white/10">
-                    <td className="px-3 py-2">{p.player_name ?? `Player ${p.ksi_player_id}`}</td>
+                   <td className="px-3 py-2">
+                      <PlayerCell p={p} />
+                    </td>
                     <td className="px-3 py-2 text-right">{fmt(p.starts)}</td>
                     <td className="px-3 py-2 text-right">{fmt(p.minutes)}</td>
                     <td className="px-3 py-2 text-right">{fmt(p.goals)}</td>
@@ -354,7 +370,9 @@ function TeamPanel({
               ) : (
                 block.topPlayers.slice(0, 15).map((p) => (
                   <tr key={p.ksi_player_id} className="border-t border-white/10">
-                    <td className="px-3 py-2">{p.player_name ?? `Player ${p.ksi_player_id}`}</td>
+                    <td className="px-3 py-2">
+                      <PlayerCell p={p} />
+                    </td>
                     <td className="px-3 py-2 text-right">{fmt(p.matches_played)}</td>
                     <td className="px-3 py-2 text-right">{fmt(p.starts)}</td>
                     <td className="px-3 py-2 text-right">{fmt(p.minutes)}</td>

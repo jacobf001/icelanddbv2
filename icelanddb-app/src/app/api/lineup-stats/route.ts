@@ -38,9 +38,9 @@ type TeamStrengthDebugRow = {
   played: number;
   points: number;
   ppm: number;
-  base: number; // clamp(ppm/3)
-  scale: number; // tierScale
-  strength: number; // clamp(base*scale)
+  base: number;
+  scale: number;
+  strength: number;
   prev?: TeamSeasonContext | null;
 };
 
@@ -80,10 +80,6 @@ function clamp(x: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, x));
 }
 
-/**
- * Tier penalty for points-per-match strength.
- * Lower tier number = higher division.
- */
 function tierScale(tier: number) {
   const t = Number.isFinite(tier) ? tier : 99;
   if (t <= 1) return 1.0;
@@ -93,9 +89,6 @@ function tierScale(tier: number) {
   return 0.32;
 }
 
-/**
- * Direct “quality prior” by tier (mismatch games).
- */
 function tierQualityN(tier: number | null | undefined) {
   const t = Number.isFinite(Number(tier)) ? Number(tier) : 6;
   if (t <= 1) return 1.0;
@@ -106,25 +99,30 @@ function tierQualityN(tier: number | null | undefined) {
   return 0.25;
 }
 
-// rough “importance”
 function calcImportance(params: {
   minutes: number;
   starts: number;
   goals: number;
   yellows: number;
   reds: number;
-  teamStrength: number; // 0..1
+  teamStrength: number;
+  tier?: number | null;
 }) {
+  const tier = params.tier ?? 1;
+
   const minutesN = clamp01(params.minutes / (90 * 20));
   const startsN = clamp01(params.starts / 20);
 
-  const goalsBoost = clamp01(params.goals / 10) * 0.25;
+  const goalsTierFactor = tier >= 6 ? 0.3 : tier === 5 ? 0.5 : tier >= 3 ? 0.7 : 1.0;
+  const goalsBoost = clamp01(params.goals / 10) * 0.25 * goalsTierFactor;
   const cardPenalty = clamp01(params.yellows * 0.02 + params.reds * 0.08);
 
   const base = minutesN * 0.55 + startsN * 0.35 + goalsBoost - cardPenalty;
   const scaled = base * (0.85 + 0.30 * params.teamStrength);
 
-  return Math.max(0, Math.round(scaled * 100));
+  const tierDiscount = tier >= 6 ? 0.35 : tier === 5 ? 0.50 : tier === 4 ? 0.65 : tier === 3 ? 0.80 : 1.0;
+
+  return Math.max(0, Math.round(scaled * tierDiscount * 100));
 }
 
 function sideRating(side: { starters: any[]; bench: any[] }, sideStrength: number) {
@@ -173,9 +171,7 @@ function computeOdds(params: { homeOverall: number; awayOverall: number; homeTie
   const homeTier = Number.isFinite(Number(params.homeTier)) ? Number(params.homeTier) : 6;
   const awayTier = Number.isFinite(Number(params.awayTier)) ? Number(params.awayTier) : 6;
 
-  // >0 means home is in better tier
   const tierAdv = clamp((awayTier - homeTier) * 0.85, -4, 4);
-
   const z = diffOverall + tierAdv;
 
   const pHomeRaw = sigmoid(z);
@@ -216,6 +212,41 @@ function pickBestRowPerTeam(rows: any[]) {
   return best;
 }
 
+function posMultiplier(position: number | null, leagueSize: number | null) {
+  if (!position || !leagueSize || leagueSize <= 1) return 1.0;
+  const posN = clamp01(1 - (position - 1) / (leagueSize - 1));
+  return 0.75 + 0.40 * posN;
+}
+
+function strengthFromRow(row: any, leagueSize: number | null) {
+  const played = Number(row.played ?? 0);
+  const points = Number(row.points ?? 0);
+  const tier = Number(row.competition_tier ?? 99);
+  const position = Number.isFinite(Number(row.position)) ? Number(row.position) : null;
+
+  const ppm = played > 0 ? points / played : 0;
+  const base = clamp01(ppm / 3);
+  const scale = tierScale(tier);
+  const posMul = posMultiplier(position, leagueSize);
+
+  return {
+    played,
+    points,
+    tier: Number.isFinite(tier) ? tier : null,
+    position,
+    ppm,
+    base,
+    scale,
+    posMul,
+    strength: clamp01(base * scale * posMul),
+  };
+}
+
+function blendStrength(current: number, prev: number, played: number) {
+  const w = clamp01(played / 8);
+  return clamp01(w * current + (1 - w) * prev);
+}
+
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
 
@@ -253,6 +284,19 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "No players parsed from lineups" }, { status: 200 });
   }
 
+  // Fetch birth years from players table
+  const { data: playerBirthRows, error: birthErr } = await supabaseAdmin
+    .from("players")
+    .select("ksi_player_id, birth_year")
+    .in("ksi_player_id", allIds);
+
+  if (birthErr) return NextResponse.json({ error: birthErr.message }, { status: 500 });
+
+  const birthYearById = new Map<string, number | null>();
+  for (const r of playerBirthRows ?? []) {
+    birthYearById.set(String(r.ksi_player_id), r.birth_year ?? null);
+  }
+
   // 2) Player season rows: current + previous
   const { data: seasonRows, error: seasonErr } = await supabaseAdmin
     .from("player_season_to_date")
@@ -270,22 +314,38 @@ export async function GET(req: Request) {
 
   if (prevSeasonErr) return NextResponse.json({ error: prevSeasonErr.message }, { status: 500 });
 
-  // choose per player the row with most minutes (handles transfers)
-  const bestRowByPlayer = new Map<string, any>();
+  // Best current season row per player (most minutes)
+  // All current season rows per player (supports multiple clubs)
+  const allRowsByPlayer = new Map<string, any[]>();
   for (const r of seasonRows ?? []) {
     const id = String((r as any).ksi_player_id);
-    const prev = bestRowByPlayer.get(id);
-    if (!prev || Number((r as any).minutes ?? 0) > Number((prev as any).minutes ?? 0)) bestRowByPlayer.set(id, r);
+    const arr = allRowsByPlayer.get(id) ?? [];
+    arr.push(r);
+    allRowsByPlayer.set(id, arr);
   }
 
-  const bestPrevRowByPlayer = new Map<string, any>();
+  // Best current row per player (most minutes, for importance calc)
+  const bestRowByPlayer = new Map<string, any>();
+  for (const [id, rows] of allRowsByPlayer.entries()) {
+    bestRowByPlayer.set(id, rows.reduce((a, b) => Number(a.minutes ?? 0) >= Number(b.minutes ?? 0) ? a : b));
+  }
+
+  // All prev season rows per player (supports multiple clubs)
+  const allPrevRowsByPlayer = new Map<string, any[]>();
   for (const r of prevSeasonRows ?? []) {
     const id = String((r as any).ksi_player_id);
-    const prev = bestPrevRowByPlayer.get(id);
-    if (!prev || Number((r as any).minutes ?? 0) > Number((prev as any).minutes ?? 0)) bestPrevRowByPlayer.set(id, r);
+    const arr = allPrevRowsByPlayer.get(id) ?? [];
+    arr.push(r);
+    allPrevRowsByPlayer.set(id, arr);
   }
 
-  // team name lookup (for any team appearing in either season rows)
+  // Best prev row per player (for importance calc)
+  const bestPrevRowByPlayer = new Map<string, any>();
+  for (const [id, rows] of allPrevRowsByPlayer.entries()) {
+    bestPrevRowByPlayer.set(id, rows.reduce((a, b) => Number(a.minutes ?? 0) >= Number(b.minutes ?? 0) ? a : b));
+  }
+
+  // Team name lookup
   const seasonTeamIds = Array.from(
     new Set(
       [...(seasonRows ?? []), ...(prevSeasonRows ?? [])].map((r: any) => String(r.ksi_team_id)).filter(Boolean),
@@ -294,7 +354,11 @@ export async function GET(req: Request) {
 
   const teamNameById = new Map<string, string>();
   if (seasonTeamIds.length) {
-    const { data: tnRows, error: tnErr } = await supabaseAdmin.from("teams").select("ksi_team_id, name").in("ksi_team_id", seasonTeamIds);
+    const { data: tnRows, error: tnErr } = await supabaseAdmin
+      .from("teams")
+      .select("ksi_team_id, name")
+      .in("ksi_team_id", seasonTeamIds);
+
     if (tnErr) return NextResponse.json({ error: tnErr.message }, { status: 500 });
 
     for (const t of tnRows ?? []) {
@@ -304,79 +368,104 @@ export async function GET(req: Request) {
     }
   }
 
-  // 3) Team strength + context for HOME/AWAY (current + prev)
+  // 3) Team strength
   const homeTeamId = teams.home.ksi_team_id;
   const awayTeamId = teams.away.ksi_team_id;
-  const teamIdsToLoad = [homeTeamId, awayTeamId].filter(Boolean) as string[];
+
+  const statTeamIds = Array.from(
+    new Set(
+      [...(seasonRows ?? []), ...(prevSeasonRows ?? [])].map((r: any) => String(r.ksi_team_id)).filter(Boolean),
+    ),
+  );
+
+  const teamIdsToLoad = Array.from(new Set([homeTeamId, awayTeamId, ...statTeamIds].filter(Boolean))) as string[];
 
   const strengthByTeam = new Map<string, number>();
   const tierByTeam = new Map<string, number>();
   const teamStrengthDebug = new Map<string, TeamStrengthDebugRow>();
 
   if (teamIdsToLoad.length) {
-    const { data: tableRows, error: tableErr } = await supabaseAdmin
+    const { data: curRows, error: curErr } = await supabaseAdmin
       .from("computed_league_table")
-      .select("team_ksi_id, played, points, competition_tier, competition_name, position")
+      .select("season_year, team_ksi_id, ksi_competition_id, played, points, competition_tier, competition_name, position")
       .eq("season_year", seasonYear)
       .in("team_ksi_id", teamIdsToLoad);
 
-    if (tableErr) return NextResponse.json({ error: tableErr.message }, { status: 500 });
+    if (curErr) return NextResponse.json({ error: curErr.message }, { status: 500 });
 
-    const bestRowByTeam = pickBestRowPerTeam(tableRows ?? []);
-
-    for (const [id, row] of bestRowByTeam.entries()) {
-      const played = Number((row as any).played ?? 0);
-      const points = Number((row as any).points ?? 0);
-      const tier = Number((row as any).competition_tier ?? 99);
-
-      const competition_name = (row as any).competition_name ?? null;
-      const position = Number.isFinite(Number((row as any).position)) ? Number((row as any).position) : null;
-
-      const ppm = played > 0 ? points / played : 0;
-      const base = clamp01(ppm / 3);
-      const scale = tierScale(tier);
-      const strength = clamp01(base * scale);
-
-      strengthByTeam.set(id, strength);
-      tierByTeam.set(id, Number.isFinite(tier) ? tier : 99);
-
-      teamStrengthDebug.set(id, {
-        team_ksi_id: id,
-        competition_tier: Number.isFinite(tier) ? tier : null,
-        competition_name,
-        position,
-        played,
-        points,
-        ppm,
-        base,
-        scale,
-        strength,
-        prev: null,
-      });
+    const leagueSizeByComp = new Map<string, number>();
+    for (const r of curRows ?? []) {
+      const compId = String((r as any).ksi_competition_id ?? "");
+      if (!compId) continue;
+      leagueSizeByComp.set(compId, (leagueSizeByComp.get(compId) ?? 0) + 1);
     }
+
+    const bestCur = pickBestRowPerTeam(curRows ?? []);
 
     const { data: prevRows, error: prevErr } = await supabaseAdmin
       .from("computed_league_table")
-      .select("team_ksi_id, played, points, competition_tier, competition_name, position")
+      .select("season_year, team_ksi_id, ksi_competition_id, played, points, competition_tier, competition_name, position")
       .eq("season_year", prevSeasonYear)
       .in("team_ksi_id", teamIdsToLoad);
 
     if (prevErr) return NextResponse.json({ error: prevErr.message }, { status: 500 });
 
-    const prevBest = pickBestRowPerTeam(prevRows ?? []);
-    for (const [id, row] of prevBest.entries()) {
-      const dbg = teamStrengthDebug.get(id);
-      if (!dbg) continue;
+    const prevLeagueSizeByComp = new Map<string, number>();
+    for (const r of prevRows ?? []) {
+      const compId = String((r as any).ksi_competition_id ?? "");
+      if (!compId) continue;
+      prevLeagueSizeByComp.set(compId, (prevLeagueSizeByComp.get(compId) ?? 0) + 1);
+    }
 
-      dbg.prev = {
-        season_year: prevSeasonYear,
+    const bestPrev = pickBestRowPerTeam(prevRows ?? []);
+
+    for (const id of teamIdsToLoad) {
+      const cur = bestCur.get(id);
+      const prev = bestPrev.get(id);
+
+      const curCompId = cur ? String((cur as any).ksi_competition_id ?? "") : "";
+      const prevCompId = prev ? String((prev as any).ksi_competition_id ?? "") : "";
+
+      const curLeagueSize = curCompId ? (leagueSizeByComp.get(curCompId) ?? null) : null;
+      const prevLeagueSize = prevCompId ? (prevLeagueSizeByComp.get(prevCompId) ?? null) : null;
+
+      const curS = cur ? strengthFromRow(cur, curLeagueSize) : null;
+      const prevS = prev ? strengthFromRow(prev, prevLeagueSize) : null;
+
+      const curStrength = curS?.strength ?? 0.5;
+      const prevStrength = prevS?.strength ?? 0.5;
+
+      const played = curS?.played ?? 0;
+      const finalStrength = blendStrength(curStrength, prevStrength, played);
+
+      strengthByTeam.set(id, finalStrength);
+
+      const tier = curS?.tier ?? prevS?.tier ?? null;
+      if (tier != null) tierByTeam.set(id, tier);
+
+      teamStrengthDebug.set(id, {
         team_ksi_id: id,
-        competition_tier: Number.isFinite(Number((row as any).competition_tier)) ? Number((row as any).competition_tier) : null,
-        competition_name: (row as any).competition_name ?? null,
-        position: Number.isFinite(Number((row as any).position)) ? Number((row as any).position) : null,
-        played: Number((row as any).played ?? 0),
-        points: Number((row as any).points ?? 0),
-      };
+        competition_tier: curS?.tier ?? null,
+        competition_name: cur?.competition_name ?? null,
+        position: curS?.position ?? null,
+        played: curS?.played ?? 0,
+        points: curS?.points ?? 0,
+        ppm: curS?.ppm ?? 0,
+        base: curS?.base ?? 0,
+        scale: curS?.scale ?? 0,
+        strength: finalStrength,
+        prev: prev
+          ? {
+              season_year: prevSeasonYear,
+              team_ksi_id: id,
+              competition_tier: prevS?.tier ?? null,
+              competition_name: (prev as any).competition_name ?? null,
+              position: prevS?.position ?? null,
+              played: prevS?.played ?? 0,
+              points: prevS?.points ?? 0,
+            }
+          : null,
+      });
     }
   }
 
@@ -386,14 +475,8 @@ export async function GET(req: Request) {
   const homeTier = homeTeamId ? (tierByTeam.get(homeTeamId) ?? null) : null;
   const awayTier = awayTeamId ? (tierByTeam.get(awayTeamId) ?? null) : null;
 
-  // --- NEW: club finishing context for STAT CLUBS (player season teams) ---
-  const statTeamIds = Array.from(
-    new Set(
-      [...(seasonRows ?? []), ...(prevSeasonRows ?? [])].map((r: any) => String(r.ksi_team_id)).filter(Boolean),
-    ),
-  );
-
-  const clubCtxBySeasonTeam = new Map<string, TeamSeasonContext>(); // key: `${season}-${teamId}`
+  // Player club context
+  const clubCtxBySeasonTeam = new Map<string, TeamSeasonContext>();
 
   if (statTeamIds.length) {
     const { data: clubRows, error: clubErr } = await supabaseAdmin
@@ -404,7 +487,6 @@ export async function GET(req: Request) {
 
     if (clubErr) return NextResponse.json({ error: clubErr.message }, { status: 500 });
 
-    // group by season-team
     const grouped = new Map<string, any[]>();
     for (const r of clubRows ?? []) {
       const k = `${r.season_year}-${r.team_ksi_id}`;
@@ -414,7 +496,6 @@ export async function GET(req: Request) {
     }
 
     for (const [k, rows] of grouped.entries()) {
-      // pick best within that season-team group
       const best = Array.from(pickBestRowPerTeam(rows).values())[0];
       if (!best) continue;
 
@@ -432,9 +513,8 @@ export async function GET(req: Request) {
       });
     }
   }
-  // --- END NEW ---
 
-  // 4) Recent form from match_lineups
+  // 4) Recent form
   const { data: lineupRows, error: lineupErr } = await supabaseAdmin
     .from("match_lineups")
     .select("ksi_player_id, ksi_match_id, minute_in, minute_out")
@@ -446,7 +526,11 @@ export async function GET(req: Request) {
 
   const kickoffMap = new Map<string, number>();
   if (matchIds.length) {
-    const { data: matchRows, error: matchErr } = await supabaseAdmin.from("matches").select("ksi_match_id, kickoff_at").in("ksi_match_id", matchIds);
+    const { data: matchRows, error: matchErr } = await supabaseAdmin
+      .from("matches")
+      .select("ksi_match_id, kickoff_at")
+      .in("ksi_match_id", matchIds);
+
     if (matchErr) return NextResponse.json({ error: matchErr.message }, { status: 500 });
 
     for (const m of matchRows ?? []) {
@@ -480,7 +564,6 @@ export async function GET(req: Request) {
 
   function enrich(p: LineupPlayer, side: "home" | "away") {
     const r = bestRowByPlayer.get(String(p.ksi_player_id)) ?? null;
-    const pr = bestPrevRowByPlayer.get(String(p.ksi_player_id)) ?? null;
 
     const minutes = Number(r?.minutes ?? 0);
     const starts = Number(r?.starts ?? 0);
@@ -489,52 +572,71 @@ export async function GET(req: Request) {
     const reds = Number(r?.reds ?? 0);
 
     const statTeamId = r?.ksi_team_id ? String(r.ksi_team_id) : null;
-    const prevTeamId = pr?.ksi_team_id ? String(pr.ksi_team_id) : null;
 
-    // player club context
     const seasonClubCtx = statTeamId ? clubCtxBySeasonTeam.get(`${seasonYear}-${statTeamId}`) ?? null : null;
-    const prevClubCtx = prevTeamId ? clubCtxBySeasonTeam.get(`${prevSeasonYear}-${prevTeamId}`) ?? null : null;
 
-    // prefer player's stat team strength; fallback to side strength
     const sideStrength = side === "home" ? homeStrength : awayStrength;
-    const strength = statTeamId ? (strengthByTeam.get(statTeamId) ?? sideStrength) : sideStrength;
+    const strength = statTeamId ? (strengthByTeam.get(statTeamId) ?? 0.5) : sideStrength;
+
+    // All prev season clubs for this player
+    const prevSeasons = (allPrevRowsByPlayer.get(String(p.ksi_player_id)) ?? [])
+      .sort((a, b) => Number(b.minutes ?? 0) - Number(a.minutes ?? 0))
+      .map((pr: any) => {
+        const prevTeamId = pr?.ksi_team_id ? String(pr.ksi_team_id) : null;
+        const prevClubCtx = prevTeamId ? clubCtxBySeasonTeam.get(`${prevSeasonYear}-${prevTeamId}`) ?? null : null;
+        return {
+          season_year: prevSeasonYear,
+          ksi_team_id: prevTeamId,
+          team_name: prevTeamId ? (teamNameById.get(prevTeamId) ?? null) : null,
+          player_name: pr.player_name ?? p.name,
+          matches_played: Number(pr.matches_played ?? 0),
+          starts: Number(pr.starts ?? 0),
+          minutes: Number(pr.minutes ?? 0),
+          goals: Number(pr.goals ?? 0),
+          yellows: Number(pr.yellows ?? 0),
+          reds: Number(pr.reds ?? 0),
+          club_ctx: prevClubCtx,
+        };
+      });
+
+    const seasons = (allRowsByPlayer.get(String(p.ksi_player_id)) ?? [])
+  
+      .sort((a, b) => Number(b.minutes ?? 0) - Number(a.minutes ?? 0))
+      .map((sr: any) => {
+        const sTeamId = sr?.ksi_team_id ? String(sr.ksi_team_id) : null;
+        const sClubCtx = sTeamId ? clubCtxBySeasonTeam.get(`${seasonYear}-${sTeamId}`) ?? null : null;
+        if (p.ksi_player_id === "70651") {
+  console.log("seasons for 70651:", allRowsByPlayer.get("70651"));
+}
+        return {
+          season_year: seasonYear,
+          ksi_team_id: sTeamId,
+          team_name: sTeamId ? (teamNameById.get(sTeamId) ?? null) : null,
+          player_name: sr.player_name ?? p.name,
+          matches_played: Number(sr.matches_played ?? 0),
+          starts: Number(sr.starts ?? 0),
+          minutes: Number(sr.minutes ?? 0),
+          goals: Number(sr.goals ?? 0),
+          yellows: Number(sr.yellows ?? 0),
+          reds: Number(sr.reds ?? 0),
+          club_ctx: sClubCtx,
+        };
+      });
+
+    const season = seasons[0] ?? null;
 
     return {
       ...p,
-      season: r
-        ? {
-            season_year: seasonYear,
-            ksi_team_id: statTeamId,
-            team_name: statTeamId ? (teamNameById.get(statTeamId) ?? null) : null,
-            player_name: r.player_name ?? p.name,
-            matches_played: Number(r.matches_played ?? 0),
-            starts,
-            minutes,
-            goals,
-            yellows,
-            reds,
-            club_ctx: seasonClubCtx,
-          }
-        : null,
-
-      prevSeason: pr
-        ? {
-            season_year: prevSeasonYear,
-            ksi_team_id: prevTeamId,
-            team_name: prevTeamId ? (teamNameById.get(prevTeamId) ?? null) : null,
-            player_name: pr.player_name ?? p.name,
-            matches_played: Number(pr.matches_played ?? 0),
-            starts: Number(pr.starts ?? 0),
-            minutes: Number(pr.minutes ?? 0),
-            goals: Number(pr.goals ?? 0),
-            yellows: Number(pr.yellows ?? 0),
-            reds: Number(pr.reds ?? 0),
-            club_ctx: prevClubCtx,
-          }
-        : null,
-
+      birth_year: birthYearById.get(String(p.ksi_player_id)) ?? null,
+      season,
+      seasons,
+      prevSeasons,
       recent5: lastN(String(p.ksi_player_id), 5),
-      importance: r ? calcImportance({ minutes, starts, goals, yellows, reds, teamStrength: strength }) : 0,
+      importance: r ? calcImportance({
+        minutes, starts, goals, yellows, reds,
+        teamStrength: strength,
+        tier: seasonClubCtx?.competition_tier ?? null,
+      }) : 0,
     };
   }
 
@@ -548,7 +650,7 @@ export async function GET(req: Request) {
     bench: lineupJson.away.bench.map((p) => enrich(p, "away")),
   };
 
-  // 5) Missing Likely XI (impact)
+  // 5) Missing Likely XI
   async function buildMissingLikelyXI(side: "home" | "away") {
     const teamId = side === "home" ? homeTeamId : awayTeamId;
     if (!teamId) return { missing: [], missingImpact: 0 };
@@ -568,7 +670,22 @@ export async function GET(req: Request) {
 
     if (missErr) throw new Error(missErr.message);
 
+    const missingPlayerIds = (missRows ?? []).map((r: any) => String(r.ksi_player_id));
+
+    const { data: missingBirthRows } = await supabaseAdmin
+      .from("players")
+      .select("ksi_player_id, birth_year")
+      .in("ksi_player_id", missingPlayerIds);
+
+    const missingBirthById = new Map<string, number | null>();
+    for (const r of missingBirthRows ?? []) {
+      missingBirthById.set(String(r.ksi_player_id), r.birth_year ?? null);
+    }
+
     const sideStrength = side === "home" ? homeStrength : awayStrength;
+
+    // Get club ctx for the team to pass tier to calcImportance
+    const teamClubCtx = clubCtxBySeasonTeam.get(`${seasonYear}-${teamId}`) ?? null;
 
     const missing = (missRows ?? []).map((r: any) => {
       const minutes = Number(r.minutes ?? 0);
@@ -580,12 +697,18 @@ export async function GET(req: Request) {
       return {
         ksi_player_id: String(r.ksi_player_id),
         player_name: r.player_name ?? null,
+        birth_year: missingBirthById.get(String(r.ksi_player_id)) ?? null,
         starts,
         minutes,
         goals,
-        importance: calcImportance({ minutes, starts, goals, yellows, reds, teamStrength: sideStrength }),
+        importance: calcImportance({
+          minutes, starts, goals, yellows, reds,
+          teamStrength: sideStrength,
+          tier: teamClubCtx?.competition_tier ?? null,
+        }),
       };
     });
+    
 
     const missingImpact = missing.reduce((s, p) => s + Number(p.importance ?? 0), 0);
     missing.sort((a, b) => (b.importance ?? 0) - (a.importance ?? 0));

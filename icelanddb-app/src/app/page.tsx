@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import type { MatchPreviewResponse, TeamRow } from "@/lib/types";
 
 const SEASONS = [2020, 2021, 2022, 2023, 2024, 2025];
@@ -576,7 +576,7 @@ function LineupPanel({ title, lineup }: { title: "Home" | "Away"; lineup: TeamLi
                 <tr key={p.ksi_player_id} className="border-t border-white/10">
                   <td className="px-3 py-2">{p.shirt_no ?? "—"}</td>
                   <td className="px-3 py-2">{p.name}</td>
-                  <td className="px-3 py-2 text-right text-white/70">{p.ksi_player_id}</td>
+                  <td className="px-3 py-2 text-right text-white/60">{(p as any).birth_year ?? p.ksi_player_id}</td>
                 </tr>
               ))}
               {lineup.starters.length === 0 && (
@@ -756,7 +756,7 @@ function MissingLikelyXI({
   items,
 }: {
   title: string;
-  items: Array<{ ksi_player_id: string; player_name: string | null; importance: number }>;
+  items: Array<{ ksi_player_id: string; player_name: string | null; importance: number; birth_year?: number | null }>;
 }) {
   if (!items || items.length === 0) return null;
 
@@ -773,7 +773,7 @@ function MissingLikelyXI({
             <tr>
               <th className="px-3 py-2 text-left">Player</th>
               <th className="px-3 py-2 text-right">Impact</th>
-              <th className="px-3 py-2 text-right">ID</th>
+              <th className="px-3 py-2 text-right">Born</th>
             </tr>
           </thead>
           <tbody>
@@ -781,7 +781,7 @@ function MissingLikelyXI({
               <tr key={p.ksi_player_id} className="border-t border-white/10">
                 <td className="px-3 py-2">{p.player_name ?? `Player ${p.ksi_player_id}`}</td>
                 <td className="px-3 py-2 text-right font-semibold text-red-300">{p.importance}</td>
-                <td className="px-3 py-2 text-right text-white/60">{p.ksi_player_id}</td>
+               <td className="px-3 py-2 text-right text-white/60">{p.birth_year ?? p.ksi_player_id}</td>
               </tr>
             ))}
           </tbody>
@@ -792,6 +792,17 @@ function MissingLikelyXI({
 }
 
 function PlayerAnalysisTable({ title, rows }: { title: string; rows: any[] }) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  function toggle(id: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
   return (
     <div className="rounded-xl border border-white/10 bg-black/30 p-4">
       <h3 className="text-base font-semibold">{title}</h3>
@@ -805,47 +816,82 @@ function PlayerAnalysisTable({ title, rows }: { title: string; rows: any[] }) {
               <th className="px-3 py-2 text-right">Min</th>
               <th className="px-3 py-2 text-right">Starts</th>
               <th className="px-3 py-2 text-right">G</th>
-              <th className="px-3 py-2 text-right">Last5 Min</th>
+              <th className="px-3 py-2 text-right">Last5</th>
               <th className="px-3 py-2 text-right">Imp</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={7} className="px-3 py-3 text-white/60">
-                  No rows.
-                </td>
+                <td colSpan={7} className="px-3 py-3 text-white/60">No rows.</td>
               </tr>
             ) : (
-              rows.map((p) => (
-                <tr key={p.ksi_player_id} className="border-t border-white/10">
-                  <td className="px-3 py-2">{p.shirt_no ?? "—"}</td>
-                  <td className="px-3 py-2">
-                    <div className="font-medium">{p.season?.player_name ?? p.name ?? `Player ${p.ksi_player_id}`}</div>
-                    <div className="text-xs text-white/50">{p.ksi_player_id}</div>
-                   <div className="mt-1 text-xs text-white/60">
-                        2025: {p.season?.team_name ?? "—"}
-                      </div>
-                      <div className="text-xs text-white/50">
-                        2024: {p.prevSeason?.team_name ?? "—"}
-                      </div>
-
-                  </td>
-                  <td className="px-3 py-2 text-right">{p.season ? p.season.minutes : "—"}</td>
-                  <td className="px-3 py-2 text-right">{p.season ? p.season.starts : "—"}</td>
-                  <td className="px-3 py-2 text-right">{p.season ? p.season.goals : "—"}</td>
-                  <td className="px-3 py-2 text-right">{p.recent5 ? p.recent5.lastNMinutes : "—"}</td>
-                  <td className="px-3 py-2 text-right font-semibold">{p.importance ?? "—"}</td>
-                </tr>
-              ))
+              rows.map((p) => {
+                const isOpen = expanded.has(p.ksi_player_id);
+                const imp = p.importance ?? 0;
+                const impColor = imp >= 80 ? "text-emerald-400" : imp >= 50 ? "text-yellow-400" : imp >= 25 ? "text-white/80" : "text-white/40";
+                const rowAccent = imp >= 80 
+                  ? "border-l-2 border-l-emerald-500/60 bg-emerald-950/30" 
+                  : imp >= 50 
+                  ? "border-l-2 border-l-yellow-500/40 bg-yellow-950/20" 
+                  : "";
+                return (
+                  <React.Fragment key={p.ksi_player_id}>
+                    <tr
+                      className={`border-t border-white/10 cursor-pointer hover:brightness-125 transition-colors ${rowAccent}`}
+                      onClick={() => toggle(p.ksi_player_id)}
+                    >
+                      <td className="px-3 py-2 text-white/50">{p.shirt_no ?? "—"}</td>
+                      <td className="px-3 py-2">
+                        <div className={`font-medium ${imp >= 80 ? "text-white" : "text-white/80"}`}>
+                          {p.season?.player_name ?? p.name ?? `Player ${p.ksi_player_id}`}
+                        </div>
+                        <div className="text-xs text-white/40">{p.birth_year ?? "—"}</div>
+                      </td>
+                      <td className="px-3 py-2 text-right text-white/60">{p.season ? p.season.minutes : "—"}</td>
+                      <td className="px-3 py-2 text-right text-white/60">{p.season ? p.season.starts : "—"}</td>
+                      <td className="px-3 py-2 text-right text-white/60">{p.season ? p.season.goals : "—"}</td>
+                      <td className="px-3 py-2 text-right text-white/60">{p.recent5 ? p.recent5.lastNMinutes : "—"}</td>
+                      <td className={`px-3 py-2 text-right font-bold ${impColor}`}>{p.importance ?? "—"}</td>
+                    </tr>
+                    {isOpen && (
+                      <tr key={`${p.ksi_player_id}-detail`} className="bg-white/3 border-t border-white/5">
+                        <td />
+                        <td colSpan={6} className="px-3 py-2 text-xs text-white/60 space-y-1">
+                          {p.seasons?.length > 0
+                            ? p.seasons.map((s: any, i: number) => (
+                                <div key={i}>
+                                  2025: {s.team_name ?? "—"}
+                                  {s.club_ctx?.competition_tier ? ` · Tier ${s.club_ctx.competition_tier}` : ""}
+                                  {s.club_ctx?.position ? ` · Pos ${s.club_ctx.position}` : ""}
+                                  {s.minutes ? ` (${s.minutes}m)` : ""}
+                                </div>
+                              ))
+                            : <div>2025: —</div>
+                          }
+                          {p.prevSeasons?.length > 0
+                            ? p.prevSeasons.map((ps: any, i: number) => (
+                                <div key={i}>
+                                  2024: {ps.team_name ?? "—"}
+                                  {ps.club_ctx?.competition_tier ? ` · Tier ${ps.club_ctx.competition_tier}` : ""}
+                                  {ps.club_ctx?.position ? ` · Pos ${ps.club_ctx.position}` : ""}
+                                  {ps.minutes ? ` (${ps.minutes}m)` : ""}
+                                </div>
+                              ))
+                            : <div>2024: —</div>
+                          }
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                );
+              })
             )}
           </tbody>
         </table>
       </div>
 
-      <p className="mt-2 text-xs text-white/50">
-        Imp = rough importance score from minutes/starts/goals/cards, scaled by club strength.
-      </p>
+      <p className="mt-2 text-xs text-white/40">Click a row to expand club details.</p>
     </div>
   );
 }
