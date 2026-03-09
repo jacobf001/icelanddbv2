@@ -1,6 +1,9 @@
-import "dotenv/config";
+import * as dotenv from "dotenv";
+import path from "path";
 import { createClient } from "@supabase/supabase-js";
 import * as cheerio from "cheerio";
+dotenv.config({ path: path.resolve(process.cwd(), "../.env"), override: true });
+
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -247,16 +250,27 @@ async function main() {
   console.log(`Scrape match lineups ${fromYear}..${toYear}`);
   console.log(`Dry: ${dry ? "YES" : "NO"} | sleep=${sleepMs}ms | limit=${limit || "none"} | debug=${debug ? "YES" : "NO"}`);
 
-  const { data: matches, error } = await supabase
-    .from("matches")
-    .select("ksi_match_id, season_year, scraped_report_at, home_team_ksi_id, away_team_ksi_id")
-    .gte("season_year", fromYear)
-    .lte("season_year", toYear);
+  const all: any[] = [];
+  let from = 0;
+  const pageSize = 1000;
+  while (true) {
+    const { data, error } = await supabase
+      .from("matches")
+      .select("ksi_match_id, season_year, scraped_report_at, home_team_ksi_id, away_team_ksi_id")
+      .gte("season_year", fromYear)
+      .lte("season_year", toYear)
+      .is("scraped_report_at", null)
+      .range(from, from + pageSize - 1);
 
-  if (error) throw new Error(error.message);
+    if (error) throw new Error(error.message);
+    const batch = data ?? [];
+    all.push(...batch);
+    if (batch.length < pageSize) break;
+    from += pageSize;
+  }
 
-  const all = (matches ?? []) as any[];
-  const todo = all.filter((m) => !m.scraped_report_at);
+  const todo = all;
+
   const target = limit && limit > 0 ? todo.slice(0, limit) : todo;
 
   console.log(`Matches needing lineup scrape: ${todo.length} | processing: ${target.length}`);

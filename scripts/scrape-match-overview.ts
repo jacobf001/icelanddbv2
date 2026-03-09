@@ -1,6 +1,8 @@
-import "dotenv/config";
+import * as dotenv from "dotenv";
+import path from "path";
 import { createClient } from "@supabase/supabase-js";
 import * as cheerio from "cheerio";
+dotenv.config({ path: path.resolve(process.cwd(), "../.env"), override: true });
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -205,17 +207,34 @@ async function main() {
   console.log(`Scrape match overviews ${fromYear}..${toYear}`);
   console.log(`Dry: ${dry ? "YES" : "NO"} | sleep=${sleepMs}ms | limit=${limit || "none"} | debug=${debug ? "YES" : "NO"}`);
 
-  const { data, error } = await supabase
-    .from("matches")
-    .select(
-      "ksi_match_id, season_year, kickoff_at, home_team_ksi_id, away_team_ksi_id, home_score, away_score"
-    )
-    .gte("season_year", fromYear)
-    .lte("season_year", toYear);
+  const { data: femaleComps, error: femaleCompsError } = await supabase
+    .from("competitions")
+    .select("ksi_competition_id")
+    .eq("gender", "Female");
 
-  if (error) throw new Error(error.message);
+  if (femaleCompsError) throw new Error(femaleCompsError.message);
 
-  const all = (data ?? []) as any[];
+  const femaleCompIds = (femaleComps ?? []).map((c) => c.ksi_competition_id);
+  console.log("Female comp IDs:", femaleCompIds.length, femaleCompIds);
+
+  const all: any[] = [];
+  let from = 0;
+  const pageSize = 1000;
+  while (true) {
+    const { data, error } = await supabase
+      .from("matches")
+      .select("ksi_match_id, season_year, kickoff_at, home_team_ksi_id, away_team_ksi_id, home_score, away_score")
+      .gte("season_year", fromYear)
+      .lte("season_year", toYear)
+      .is("home_team_ksi_id", null)
+      .range(from, from + pageSize - 1);
+
+    if (error) throw new Error(error.message);
+    const batch = data ?? [];
+    all.push(...batch);
+    if (batch.length < pageSize) break;
+    from += pageSize;
+  }
   const todo = all.filter((m) => {
     return (
       !m.kickoff_at ||
@@ -227,8 +246,8 @@ async function main() {
   });
 
   const target = limit && limit > 0 ? todo.slice(0, limit) : todo;
-    const total = target.length;
-    console.log(`Matches needing overview scrape: ${todo.length} | processing: ${target.length}`);
+  const total = target.length;
+  console.log(`Matches needing overview scrape: ${todo.length} | processing: ${target.length}`);
 
   let ok = 0;
   let fail = 0;

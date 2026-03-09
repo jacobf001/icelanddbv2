@@ -1,7 +1,9 @@
 // scripts/scrape-events-overview.ts
-import "dotenv/config";
+import * as dotenv from "dotenv";
+import path from "path";
 import { createClient } from "@supabase/supabase-js";
 import * as cheerio from "cheerio";
+dotenv.config({ path: path.resolve(process.cwd(), "../.env"), override: true });
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -59,6 +61,13 @@ function getParamId(href: string | null | undefined, key = "id"): string | null 
 }
 
 async function fetchMatchesInRange(fromYear: number, toYear: number) {
+  const { data: femaleComps } = await supabase
+    .from("competitions")
+    .select("ksi_competition_id")
+    .eq("gender", "Female");
+
+  const femaleCompIds = (femaleComps ?? []).map((c) => c.ksi_competition_id);
+
   const pageSize = 1000;
   let from = 0;
   const all: any[] = [];
@@ -69,6 +78,7 @@ async function fetchMatchesInRange(fromYear: number, toYear: number) {
       .select("ksi_match_id, season_year, home_team_ksi_id, away_team_ksi_id")
       .gte("season_year", fromYear)
       .lte("season_year", toYear)
+      .in("ksi_competition_id", femaleCompIds)
       .order("ksi_match_id", { ascending: true })
       .range(from, from + pageSize - 1);
 
@@ -77,7 +87,7 @@ async function fetchMatchesInRange(fromYear: number, toYear: number) {
     const batch = data ?? [];
     all.push(...batch);
 
-    if (batch.length < pageSize) break; // done
+    if (batch.length < pageSize) break;
     from += pageSize;
   }
 

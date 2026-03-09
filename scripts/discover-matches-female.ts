@@ -22,16 +22,14 @@ function arg(name: string): string | null {
   return process.argv[i + 1] ?? null;
 }
 
-// U19 only: default 2024..2025
-const fromYear = Number(arg("--from") ?? "2024");
-const toYear = Number(arg("--to") ?? "2025");
-
+const fromYear = Number(arg("--from") ?? "2020");
+const toYear = Number(arg("--to") ?? "2026");
 const sleepMs = Number(arg("--sleep") ?? "250");
 const limit = Number(arg("--limit") ?? "0"); // 0 = unlimited
 const dry = process.argv.includes("--dry");
 const debug = process.argv.includes("--debug");
 
-// paging knobs
+// paging knobs (KSI may ignore them; harmless if ignored)
 const maxPages = Number(arg("--maxPages") ?? "80");
 const pageSize = Number(arg("--pageSize") ?? "200");
 
@@ -50,6 +48,7 @@ type MatchUpsert = {
   ksi_competition_id: string;
   season_year: number;
 
+  // these will be filled later by scraping each match overview/report
   kickoff_at: string | null;
   venue: string | null;
   home_team_ksi_id: string | null;
@@ -68,12 +67,10 @@ function extractMatchIdFromHref(href: string): string | null {
   return m ? m[1] : null;
 }
 
-function competitionMatchesUrl(ksiCompetitionId: string, season: number, page?: number) {
-  // IMPORTANT: U19 pages are on ksi.is (no www)
-  const u = new URL("https://ksi.is/oll-mot/mot");
+function competitionMatchesUrl(ksiCompetitionId: string, page?: number) {
+  const u = new URL("https://www.ksi.is/oll-mot/mot");
   u.searchParams.set("id", ksiCompetitionId);
   u.searchParams.set("banner-tab", "matches-and-results");
-  u.searchParams.set("season", String(season));
   u.searchParams.set("pageSize", String(pageSize));
   if (page && page > 1) u.searchParams.set("page", String(page));
   return u.toString();
@@ -81,7 +78,7 @@ function competitionMatchesUrl(ksiCompetitionId: string, season: number, page?: 
 
 async function fetchHtml(url: string): Promise<string> {
   const res = await fetch(url, {
-    headers: { "user-agent": "Mozilla/5.0 (icelanddbv2; discover-u19-matches)" },
+    headers: { "user-agent": "Mozilla/5.0 (icelanddbv2; discover-matches)" },
     redirect: "follow",
   });
   if (!res.ok) throw new Error(`Fetch failed ${res.status} for ${url}`);
@@ -91,36 +88,31 @@ async function fetchHtml(url: string): Promise<string> {
 function extractMatchIdsFromDoc($: cheerio.CheerioAPI) {
   const ids: string[] = [];
 
-  // U19 match links appear as relative href="/leikir-og-urslit/felagslid/leikur?id=761846"
-  // Sometimes also full links containing leikur?id=...
-  $("a[href]").each((_, a) => {
+  $("a[href*='leikur?id=']").each((_, a) => {
     const href = ($(a as unknown as Element).attr("href") as any) ?? "";
-    const s = String(href);
-    if (!s.includes("leikur?id=")) return;
-
-    const mid = extractMatchIdFromHref(s);
+    const mid = extractMatchIdFromHref(String(href));
     if (!mid) return;
     ids.push(mid);
   });
 
+  // de-dup
   return Array.from(new Set(ids));
 }
 
 // -------------------- MAIN --------------------
 async function main() {
-  console.log(`Discover U19 matches (store match IDs only) ${fromYear}..${toYear}`);
+  console.log(`Discover matches FEMALE (store match IDs only) ${fromYear}..${toYear}`);
   console.log(
     `Dry: ${dry ? "YES" : "NO"} | sleep=${sleepMs}ms | limit=${limit || "none"} | debug=${debug ? "YES" : "NO"}`
   );
 
-  // Pull U19 competitions from your existing competitions table
   const { data: comps, error } = await supabase
     .from("competitions")
     .select("ksi_competition_id, season_year, name, gender, category, tier")
-    .eq("gender", "Male")
-    .eq("category", "U-19")
+     .eq("gender", "Female")
     .gte("season_year", fromYear)
     .lte("season_year", toYear)
+    .in("tier", [1, 2, 3, 4, 5, 6])
     .order("season_year", { ascending: true })
     .order("tier", { ascending: true });
 
@@ -137,14 +129,14 @@ async function main() {
   let totalUpserted = 0;
 
   for (const c of target) {
-    console.log(`\n[${c.season_year} T${c.tier ?? "?"}] ${c.name} (${c.ksi_competition_id})`);
+    console.log(`\n[${c.season_year} T${c.tier ?? "?"}] ${c.name}`);
 
     try {
       const seen = new Set<string>();
       const all: MatchUpsert[] = [];
 
       for (let page = 1; page <= maxPages; page++) {
-        const url = competitionMatchesUrl(c.ksi_competition_id, c.season_year, page);
+        const url = competitionMatchesUrl(c.ksi_competition_id, page);
         if (debug) console.log(`  fetch: ${url}`);
 
         const html = await fetchHtml(url);
@@ -175,7 +167,7 @@ async function main() {
 
         if (debug) console.log(`  page ${page}: gained=${gained} total=${all.length}`);
 
-        // Stop when no new IDs appear
+        // stop when paging gives nothing new
         if (gained === 0) break;
 
         if (sleepMs > 0) await sleep(Math.min(150, sleepMs));
@@ -193,12 +185,9 @@ async function main() {
           const chunkSize = 500;
           for (let i = 0; i < all.length; i += chunkSize) {
             const chunk = all.slice(i, i + chunkSize);
-
-            // matches table PK is ksi_match_id (from your screenshots)
             const { error: upErr } = await supabase.from("matches").upsert(chunk, {
               onConflict: "ksi_match_id",
             });
-
             if (upErr) throw new Error(upErr.message);
             totalUpserted += chunk.length;
           }

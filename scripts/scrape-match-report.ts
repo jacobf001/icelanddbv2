@@ -1,6 +1,8 @@
-import "dotenv/config";
+import * as dotenv from "dotenv";
+import path from "path";
 import { createClient } from "@supabase/supabase-js";
 import * as cheerio from "cheerio";
+dotenv.config({ path: path.resolve(process.cwd(), "../.env"), override: true });
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;

@@ -105,24 +105,15 @@ function calcImportance(params: {
   goals: number;
   yellows: number;
   reds: number;
-  teamStrength: number;
-  tier?: number | null;
 }) {
-  const tier = params.tier ?? 1;
-
   const minutesN = clamp01(params.minutes / (90 * 20));
   const startsN = clamp01(params.starts / 20);
-
-  const goalsTierFactor = tier >= 6 ? 0.3 : tier === 5 ? 0.5 : tier >= 3 ? 0.7 : 1.0;
-  const goalsBoost = clamp01(params.goals / 10) * 0.25 * goalsTierFactor;
+  const goalsBoost = clamp01(params.goals / 10) * 0.25;
   const cardPenalty = clamp01(params.yellows * 0.02 + params.reds * 0.08);
 
   const base = minutesN * 0.55 + startsN * 0.35 + goalsBoost - cardPenalty;
-  const scaled = base * (0.85 + 0.30 * params.teamStrength);
 
-  const tierDiscount = tier >= 6 ? 0.35 : tier === 5 ? 0.50 : tier === 4 ? 0.65 : tier === 3 ? 0.80 : 1.0;
-
-  return Math.max(0, Math.round(scaled * tierDiscount * 100));
+  return Math.max(0, Math.round(base * 100));
 }
 
 function sideRating(side: { starters: any[]; bench: any[] }, sideStrength: number) {
@@ -634,8 +625,6 @@ export async function GET(req: Request) {
       recent5: lastN(String(p.ksi_player_id), 5),
       importance: r ? calcImportance({
         minutes, starts, goals, yellows, reds,
-        teamStrength: strength,
-        tier: seasonClubCtx?.competition_tier ?? null,
       }) : 0,
     };
   }
@@ -703,8 +692,6 @@ export async function GET(req: Request) {
         goals,
         importance: calcImportance({
           minutes, starts, goals, yellows, reds,
-          teamStrength: sideStrength,
-          tier: teamClubCtx?.competition_tier ?? null,
         }),
       };
     });
