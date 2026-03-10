@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '0 6 * * *'
   workflow_dispatch:
+    inputs:
+      from_year:
+        description: 'From year (default: current year)'
+        required: false
+        default: '2026'
 
 jobs:
   scrape:
@@ -22,15 +27,38 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run pipeline
-        run: |
-          cd scripts
-          node --import tsx/esm "1.discover-competitions.ts"
-          node --import tsx/esm "2.discover-matches.ts"
-          node --import tsx/esm "3.scrape-match-overview.ts"
-          node --import tsx/esm "4.scrape-match-lineups.ts"
-          node --import tsx/esm "5.scrape-events-overview.ts"
-          node --import tsx/esm "6.scrape-player-birth-years.ts"
+      - name: 1. Discover competitions
+        run: cd scripts && npx tsx 1.discover-competitions.ts
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      - name: 2. Discover matches
+        run: cd scripts && npx tsx 2.discover-matches.ts --from ${{ github.event.inputs.from_year || '2026' }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      - name: 3. Scrape match overviews
+        run: cd scripts && npx tsx 3.scrape-match-overview.ts --from ${{ github.event.inputs.from_year || '2026' }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      - name: 4. Scrape lineups
+        run: cd scripts && npx tsx 4.scrape-match-lineups.ts --from ${{ github.event.inputs.from_year || '2026' }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      - name: 5. Scrape events
+        run: cd scripts && npx tsx 5.scrape-events-overview.ts --from ${{ github.event.inputs.from_year || '2026' }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      - name: 6. Scrape player birth years
+        run: cd scripts && npx tsx 6.scrape-player-birth-years.ts
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
