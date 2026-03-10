@@ -13,6 +13,10 @@ on:
         description: 'Max matches per script (0 = unlimited)'
         required: false
         default: '200'
+      discover:
+        description: 'Run discover competitions + matches? (yes/no)'
+        required: false
+        default: 'no'
 
 jobs:
   scrape:
@@ -32,30 +36,38 @@ jobs:
         run: npm ci
 
       - name: 1. Discover competitions
+        if: github.event.inputs.discover == 'yes'
         run: cd scripts && npx tsx 1.discover-competitions.ts
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
-      - name: 2. Scrape match overviews
+      - name: 2. Discover matches
+        if: github.event.inputs.discover == 'yes'
+        run: cd scripts && npx tsx 2.discover-matches.ts --from ${{ github.event.inputs.from_year || '2026' }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      - name: 3. Scrape match overviews
         run: cd scripts && npx tsx 3.scrape-match-overview.ts --from ${{ github.event.inputs.from_year || '2026' }} --limit ${{ github.event.inputs.limit || '200' }}
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
-      - name: 3. Scrape lineups
+      - name: 4. Scrape lineups
         run: cd scripts && npx tsx 4.scrape-match-lineups.ts --from ${{ github.event.inputs.from_year || '2026' }} --limit ${{ github.event.inputs.limit || '200' }}
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
-      - name: 4. Scrape events
+      - name: 5. Scrape events
         run: cd scripts && npx tsx 5.scrape-events-overview.ts --from ${{ github.event.inputs.from_year || '2026' }} --limit ${{ github.event.inputs.limit || '200' }}
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
-      - name: 5. Scrape player birth years
+      - name: 6. Scrape player birth years
         run: cd scripts && npx tsx 6.scrape-player-birth-years.ts --limit ${{ github.event.inputs.limit || '200' }}
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
