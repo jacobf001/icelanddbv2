@@ -9,6 +9,10 @@ on:
         description: 'From year (default: current year)'
         required: false
         default: '2026'
+      limit:
+        description: 'Max matches per script (0 = unlimited)'
+        required: false
+        default: '200'
 
 jobs:
   scrape:
@@ -40,25 +44,25 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
       - name: 3. Scrape match overviews
-        run: cd scripts && npx tsx 3.scrape-match-overview.ts --from ${{ github.event.inputs.from_year || '2026' }}
+        run: cd scripts && npx tsx 3.scrape-match-overview.ts --from ${{ github.event.inputs.from_year || '2026' }} --limit ${{ github.event.inputs.limit || '200' }}
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
       - name: 4. Scrape lineups
-        run: cd scripts && npx tsx 4.scrape-match-lineups.ts --from ${{ github.event.inputs.from_year || '2026' }}
+        run: cd scripts && npx tsx 4.scrape-match-lineups.ts --from ${{ github.event.inputs.from_year || '2026' }} --limit ${{ github.event.inputs.limit || '200' }}
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
       - name: 5. Scrape events
-        run: cd scripts && npx tsx 5.scrape-events-overview.ts --from ${{ github.event.inputs.from_year || '2026' }}
+        run: cd scripts && npx tsx 5.scrape-events-overview.ts --from ${{ github.event.inputs.from_year || '2026' }} --limit ${{ github.event.inputs.limit || '200' }}
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
       - name: 6. Scrape player birth years
-        run: cd scripts && npx tsx 6.scrape-player-birth-years.ts
+        run: cd scripts && npx tsx 6.scrape-player-birth-years.ts --limit ${{ github.event.inputs.limit || '200' }}
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
