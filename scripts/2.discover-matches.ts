@@ -85,8 +85,8 @@ function extractMatchIdsFromDoc($: cheerio.CheerioAPI) {
     const hasScore = /^\d+\s*-\s*\d+$/.test(scoreText);
     if (!hasScore) return;
 
-    // Find the match link in the same container
-    const container = $(span).closest(".grid");
+    // Go up to the root match container and find the leikur link
+    const container = $(span).closest("div.grid.grid-cols-\\[70\\%_auto\\]");
     const link = container.find("a[href*='leikur?id=']").first();
     const href = link.attr("href") ?? "";
     const mid = extractMatchIdFromHref(href);
@@ -94,6 +94,7 @@ function extractMatchIdsFromDoc($: cheerio.CheerioAPI) {
   });
   return Array.from(new Set(ids));
 }
+
 
 async function main() {
   console.log(`Discover matches (all genders) ${fromYear}..${toYear}`);
