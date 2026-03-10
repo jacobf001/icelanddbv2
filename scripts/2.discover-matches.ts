@@ -80,18 +80,17 @@ async function fetchHtml(url: string): Promise<string> {
 
 function extractMatchIdsFromDoc($: cheerio.CheerioAPI) {
   const ids: string[] = [];
-  $("a[href*='leikur?id=']").each((_, a) => {
-    const href = ($(a as unknown as Element).attr("href") as any) ?? "";
-    const mid = extractMatchIdFromHref(String(href));
-    if (!mid) return;
+  $("span.body-4.whitespace-nowrap").each((_, span) => {
+    const scoreText = $(span).text().trim();
+    const hasScore = /^\d+\s*-\s*\d+$/.test(scoreText);
+    if (!hasScore) return;
 
-    // Check if match has a score (not a future fixture)
-    const row = $(a).closest("tr, li, div.match, div.game, article").first();
-    const scoreText = row.text();
-    const hasScore = /\d+\s*[-–]\s*\d+/.test(scoreText);
-    if (!hasScore) return; // skip future matches
-
-    ids.push(mid);
+    // Find the match link in the same container
+    const container = $(span).closest(".grid");
+    const link = container.find("a[href*='leikur?id=']").first();
+    const href = link.attr("href") ?? "";
+    const mid = extractMatchIdFromHref(href);
+    if (mid) ids.push(mid);
   });
   return Array.from(new Set(ids));
 }
