@@ -26,37 +26,37 @@ jobs:
         run: npm install -g ts-node typescript
 
       - name: 1. Discover competitions
-        run: cd scripts && ts-node 1.discover-competitions.ts
+        run: cd scripts && ts-node --project ../tsconfig.json --transpile-only 1.discover-competitions.ts
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
       - name: 2. Discover matches
-        run: cd scripts && ts-node 2.discover-matches.ts
+        run: cd scripts && ts-node --project ../tsconfig.json --transpile-only 2.discover-matches.ts
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
       - name: 3. Scrape match overviews
-        run: cd scripts && ts-node 3.scrape-match-overview.ts
+        run: cd scripts && ts-node --project ../tsconfig.json --transpile-only 3.scrape-match-overview.ts
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
       - name: 4. Scrape lineups
-        run: cd scripts && ts-node 4.scrape-match-lineups.ts
+        run: cd scripts && ts-node --project ../tsconfig.json --transpile-only 4.scrape-match-lineups.ts
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
       - name: 5. Scrape events
-        run: cd scripts && ts-node 5.scrape-events-overview.ts
+        run: cd scripts && ts-node --project ../tsconfig.json --transpile-only 5.scrape-events-overview.ts
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
       - name: 6. Scrape player birth years
-        run: cd scripts && ts-node 6.scrape-player-birth-years.ts
+        run: cd scripts && ts-node --project ../tsconfig.json --transpile-only 6.scrape-player-birth-years.ts
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
