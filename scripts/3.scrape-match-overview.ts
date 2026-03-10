@@ -173,6 +173,7 @@ async function main() {
       .gte("season_year", fromYear)
       .lte("season_year", toYear)
       .is("home_team_ksi_id", null)
+      .order("kickoff_at", { ascending: false, nullsFirst: false }) 
       .range(from, from + pageSize - 1);
 
     if (error) throw new Error(error.message);

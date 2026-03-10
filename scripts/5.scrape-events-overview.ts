@@ -66,7 +66,7 @@ async function fetchMatchesInRange(fromYear: number, toYear: number) {
       .select("ksi_match_id, season_year, home_team_ksi_id, away_team_ksi_id")
       .gte("season_year", fromYear)
       .lte("season_year", toYear)
-      .order("ksi_match_id", { ascending: true })
+      .order("kickoff_at", { ascending: false, nullsFirst: false })
       .range(from, from + pageSize - 1);
 
     if (error) throw new Error(error.message);
