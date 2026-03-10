@@ -84,6 +84,13 @@ function extractMatchIdsFromDoc($: cheerio.CheerioAPI) {
     const href = ($(a as unknown as Element).attr("href") as any) ?? "";
     const mid = extractMatchIdFromHref(String(href));
     if (!mid) return;
+
+    // Check if match has a score (not a future fixture)
+    const row = $(a).closest("tr, li, div.match, div.game, article").first();
+    const scoreText = row.text();
+    const hasScore = /\d+\s*[-–]\s*\d+/.test(scoreText);
+    if (!hasScore) return; // skip future matches
+
     ids.push(mid);
   });
   return Array.from(new Set(ids));
