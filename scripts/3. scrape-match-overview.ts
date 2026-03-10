@@ -14,7 +14,6 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false },
 });
 
-// ---------- CLI ----------
 function arg(name: string): string | null {
   const i = process.argv.indexOf(name);
   if (i === -1) return null;
@@ -22,13 +21,12 @@ function arg(name: string): string | null {
 }
 
 const fromYear = Number(arg("--from") ?? "2020");
-const toYear = Number(arg("--to") ?? "2026");
+const toYear = Number(arg("--to") ?? String(new Date().getFullYear()));
 const sleepMs = Number(arg("--sleep") ?? "250");
-const limit = Number(arg("--limit") ?? "0"); // 0 = unlimited
+const limit = Number(arg("--limit") ?? "0");
 const dry = process.argv.includes("--dry");
 const debug = process.argv.includes("--debug");
 
-// ---------- Helpers ----------
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -68,7 +66,6 @@ function extractScore($: cheerio.CheerioAPI): { home_score: number | null; away_
     if (!/[0-9]\s*[-:–]\s*[0-9]/.test(txt)) return;
     candidates.push(txt);
   });
-
   for (const c of candidates) {
     const s = parseScoreMaybe(c);
     if (s.home !== null && s.away !== null) return { home_score: s.home, away_score: s.away };
@@ -82,43 +79,33 @@ function parseKsiIdFromHref(href: string): string | null {
 }
 
 function extractHomeAwayTeam($: cheerio.CheerioAPI): {
-  homeId: string | null;
-  awayId: string | null;
-  homeName: string | null;
-  awayName: string | null;
+  homeId: string | null; awayId: string | null;
+  homeName: string | null; awayName: string | null;
 } {
-  // On overview page, team links are usually /oll-mot/mot/lid?id=XXXX&competitionId=YYYY
   const teamLinks: Array<{ id: string; name: string }> = [];
 
   $("a[href*='/oll-mot/mot/lid?id=']").each((_, a) => {
     const href = String($(a).attr("href") ?? "");
     const id = parseKsiIdFromHref(href);
     if (!id) return;
-
     const name = clean($(a).text());
     if (!name) return;
-
     teamLinks.push({ id, name });
   });
 
-  // Fallback: sometimes team links are elsewhere, still with id=XXXX and not player
   if (teamLinks.length < 2) {
     $("a[href*='id=']").each((_, a) => {
       const href = String($(a).attr("href") ?? "");
       if (href.includes("/leikmenn/") || href.includes("leikmadur")) return;
       if (!href.includes("/oll-mot/mot/lid")) return;
-
       const id = parseKsiIdFromHref(href);
       if (!id) return;
-
       const name = clean($(a).text());
       if (!name) return;
-
       teamLinks.push({ id, name });
     });
   }
 
-  // De-dupe by id while preserving order
   const uniq: Array<{ id: string; name: string }> = [];
   const seen = new Set<string>();
   for (const t of teamLinks) {
@@ -137,47 +124,26 @@ function extractHomeAwayTeam($: cheerio.CheerioAPI): {
 
 function extractVenueAndKickoff(html: string): { venue: string | null; kickoff_at: string | null } {
   const $ = cheerio.load(html);
-
-  // Venue appears as “…völlurinn” etc; simplest: locate text near “Völlur”
   const pageText = clean($("body").text());
 
-  // Example: “Fös 27. júní 2025 19:15 JÁVERK-völlurinn”
-  // We’ll try to extract ISO from “27. júní 2025 19:15”
   const monthMap: Record<string, string> = {
-    janúar: "01",
-    februar: "02",
-    febrúar: "02",
-    mars: "03",
-    april: "04",
-    apríl: "04",
-    mai: "05",
-    maí: "05",
-    juni: "06",
-    júní: "06",
-    juli: "07",
-    júlí: "07",
-    agust: "08",
-    ágúst: "08",
-    september: "09",
-    oktober: "10",
-    nóvember: "11",
-    november: "11",
-    desember: "12",
+    janúar: "01", februar: "02", febrúar: "02", mars: "03",
+    april: "04", apríl: "04", mai: "05", maí: "05",
+    juni: "06", júní: "06", juli: "07", júlí: "07",
+    agust: "08", ágúst: "08", september: "09", oktober: "10",
+    nóvember: "11", november: "11", desember: "12",
   };
 
-  // Date format: "27. júní 2025 19:15"
   const m = pageText.match(/(\d{1,2})\.\s*([A-Za-záðéíóúýþæöÁÐÉÍÓÚÝÞÆÖ]+)\s+(\d{4})\s+(\d{1,2}:\d{2})/);
   let kickoff_at: string | null = null;
   if (m) {
     const dd = String(m[1]).padStart(2, "0");
-    const monKey = m[2].toLowerCase();
-    const mm = monthMap[monKey] ?? null;
+    const mm = monthMap[m[2].toLowerCase()] ?? null;
     const yyyy = m[3];
     const hhmm = m[4].padStart(5, "0");
     if (mm) kickoff_at = `${yyyy}-${mm}-${dd}T${hhmm}:00Z`;
   }
 
-  // Venue: pick something ending in “völlur/völlurinn”
   let venue: string | null = null;
   const v = pageText.match(/([A-Z0-9ÁÐÉÍÓÚÝÞÆÖa-záðéíóúýþæö\-\s]{3,80}völlurinn|[A-Z0-9ÁÐÉÍÓÚÝÞÆÖa-záðéíóúýþæö\-\s]{3,80}völlur)/i);
   if (v) venue = clean(v[0]);
@@ -187,36 +153,16 @@ function extractVenueAndKickoff(html: string): { venue: string | null; kickoff_a
 
 async function ensureTeamsExist(teams: Array<{ id: string; name: string | null }>) {
   if (teams.length === 0) return;
-
-  // only keep ids
-  const payload = teams
-    .filter((t) => t.id)
-    .map((t) => ({
-      ksi_team_id: t.id,
-      name: t.name ?? null,
-    }));
-
-  // Upsert: if exists, keep existing name unless we have a real one
-  // (If you want: update name always, switch to upsert with "name" included)
+  const payload = teams.filter((t) => t.id).map((t) => ({ ksi_team_id: t.id, name: t.name ?? null }));
   const { error } = await supabase.from("teams").upsert(payload, { onConflict: "ksi_team_id" });
   if (error) throw new Error(`teams upsert failed: ${error.message}`);
 }
 
-// ---------- Main ----------
 async function main() {
   console.log(`Scrape match overviews ${fromYear}..${toYear}`);
   console.log(`Dry: ${dry ? "YES" : "NO"} | sleep=${sleepMs}ms | limit=${limit || "none"} | debug=${debug ? "YES" : "NO"}`);
 
-  const { data: femaleComps, error: femaleCompsError } = await supabase
-    .from("competitions")
-    .select("ksi_competition_id")
-    .eq("gender", "Female");
-
-  if (femaleCompsError) throw new Error(femaleCompsError.message);
-
-  const femaleCompIds = (femaleComps ?? []).map((c) => c.ksi_competition_id);
-  console.log("Female comp IDs:", femaleCompIds.length, femaleCompIds);
-
+  // Fetch all matches missing team data (all genders)
   const all: any[] = [];
   let from = 0;
   const pageSize = 1000;
@@ -235,15 +181,11 @@ async function main() {
     if (batch.length < pageSize) break;
     from += pageSize;
   }
-  const todo = all.filter((m) => {
-    return (
-      !m.kickoff_at ||
-      !m.home_team_ksi_id ||
-      !m.away_team_ksi_id ||
-      m.home_score === null ||
-      m.away_score === null
-    );
-  });
+
+  const todo = all.filter((m) =>
+    !m.kickoff_at || !m.home_team_ksi_id || !m.away_team_ksi_id ||
+    m.home_score === null || m.away_score === null
+  );
 
   const target = limit && limit > 0 ? todo.slice(0, limit) : todo;
   const total = target.length;
@@ -256,7 +198,6 @@ async function main() {
     const m = target[i];
     const mid = String(m.ksi_match_id);
     const url = matchOverviewUrl(mid);
-    console.log(`\nmatch ${mid} -> ${url}`);
     console.log(`\n[${i + 1}/${total}] match ${mid} -> ${url}`);
 
     try {
@@ -273,7 +214,6 @@ async function main() {
         console.log(`  parsed: kickoff_at=${kickoff_at ?? "—"} venue=${venue ?? "—"}`);
       }
 
-      // ✅ FK-safe: ensure teams exist before writing match foreign keys
       const teamsToUpsert: Array<{ id: string; name: string | null }> = [];
       if (homeId) teamsToUpsert.push({ id: homeId, name: homeName });
       if (awayId) teamsToUpsert.push({ id: awayId, name: awayName });
@@ -293,10 +233,8 @@ async function main() {
         console.log("  DRY match patch:", { ksi_match_id: mid, ...patch });
       } else {
         if (teamsToUpsert.length) await ensureTeamsExist(teamsToUpsert);
-
         const { error: upErr } = await supabase.from("matches").update(patch).eq("ksi_match_id", mid);
         if (upErr) throw new Error(upErr.message);
-
         console.log("  ✅ updated");
       }
 
