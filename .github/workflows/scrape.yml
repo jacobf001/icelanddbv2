@@ -54,6 +54,12 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      
+      - name: 3b. Cleanup future matches
+        run: cd scripts && npx tsx cleanup-future-matches.ts
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
       - name: 4. Scrape lineups
         run: cd scripts && npx tsx 4.scrape-match-lineups.ts --from ${{ github.event.inputs.from_year || '2026' }} --limit ${{ github.event.inputs.limit || '200' }}
