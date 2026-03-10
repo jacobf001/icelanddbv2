@@ -23,37 +23,43 @@ jobs:
         run: npm ci
 
       - name: 1. Discover competitions
-        run: npx ts-node scripts/1.discover-competitions.ts
+        working-directory: scripts
+        run: npx ts-node 1.discover-competitions.ts
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
       - name: 2. Discover matches
-        run: npx ts-node scripts/2.discover-matches.ts
+        working-directory: scripts
+        run: npx ts-node 2.discover-matches.ts
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
       - name: 3. Scrape match overviews
-        run: npx ts-node scripts/3.scrape-match-overview.ts
+        working-directory: scripts
+        run: npx ts-node 3.scrape-match-overview.ts
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
       - name: 4. Scrape lineups
-        run: npx ts-node scripts/4.scrape-match-lineups.ts
+        working-directory: scripts
+        run: npx ts-node 4.scrape-match-lineups.ts
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
       - name: 5. Scrape events
-        run: npx ts-node scripts/5.scrape-events-overview.ts
+        working-directory: scripts
+        run: npx ts-node 5.scrape-events-overview.ts
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
       - name: 6. Scrape player birth years
-        run: npx ts-node scripts/6.scrape-player-birth-years.ts
+        working-directory: scripts
+        run: npx ts-node 6.scrape-player-birth-years.ts
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
