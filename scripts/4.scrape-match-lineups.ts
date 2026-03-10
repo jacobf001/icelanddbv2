@@ -170,7 +170,6 @@ async function main() {
       .gte("season_year", fromYear)
       .lte("season_year", toYear)
       .is("scraped_report_at", null)
-      .lte("kickoff_at", new Date().toISOString())  // ← add this
       .order("kickoff_at", { ascending: false, nullsFirst: false })
       .range(from, from + pageSize - 1);
 

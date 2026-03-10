@@ -2,7 +2,8 @@ name: Scrape KSI Data
 
 on:
   schedule:
-    - cron: '0 6 * * *'
+    - cron: '0 6 * * *'    # daily - runs overview/lineups/events/birthyears
+    - cron: '0 5 * * 1'    # weekly Monday - also runs discover matches
   workflow_dispatch:
     inputs:
       from_year:
@@ -38,6 +39,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
       - name: 2. Discover matches
+        if: github.event.schedule == '0 5 * * 1' || github.event_name == 'workflow_dispatch'
         run: cd scripts && npx tsx 2.discover-matches.ts --from ${{ github.event.inputs.from_year || '2026' }}
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
