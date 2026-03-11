@@ -25,9 +25,11 @@ type TeamSeasonContext = {
   team_ksi_id: string;
   competition_tier: number | null;
   competition_name: string | null;
+  competition_category: string | null;  // 'Fullorðnir' | 'Adults' | 'U-19' | 'U-20' etc.
   position: number | null;
   played: number;
   points: number;
+  league_size: number | null;
 };
 
 type TeamStrengthDebugRow = {
@@ -80,6 +82,19 @@ function clamp(x: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, x));
 }
 
+// Tier weight used only for team strength calculations, NOT player importance.
+// Player importance is purely about minutes/starts/goals within their own team context.
+// Whether that team is good or bad is handled by teamStrength separately.
+function tierWeightForStrength(tier: number | null): number {
+  const t = Number.isFinite(Number(tier)) ? Number(tier) : 6;
+  if (t <= 1) return 1.0;
+  if (t === 2) return 0.72;
+  if (t === 3) return 0.50;
+  if (t === 4) return 0.33;
+  if (t === 5) return 0.18;
+  return 0.08;
+}
+
 function tierScale(tier: number) {
   const t = Number.isFinite(tier) ? tier : 99;
   if (t <= 1) return 1.0;
@@ -100,18 +115,25 @@ function tierQualityN(tier: number | null | undefined) {
 }
 
 function calcImportance(params: {
-  minutes: number;
+  minutes: number;   // already tier-weighted
   starts: number;
   goals: number;
   yellows: number;
   reds: number;
+  maxGames: number;  // full season game count for the player's primary league
 }) {
-  const minutesN = clamp01(params.minutes / (90 * 20));
-  const startsN = clamp01(params.starts / 20);
-  const goalsBoost = clamp01(params.goals / 10) * 0.25;
+  const maxMins = params.maxGames * 90;
+  const minutesN = clamp01(params.minutes / maxMins);
+  const startsN = clamp01(params.starts / params.maxGames);
+
+  // Minutes is the dominant signal (65%). Starts add texture (25%).
+  // Goals give a small boost — toned down so a 4-goal squad player
+  // doesn't outscore a full-season regular with 0 goals.
+  const goalsBoost = clamp01(params.goals / 20) * 0.10;
   const cardPenalty = clamp01(params.yellows * 0.02 + params.reds * 0.08);
 
-  const base = minutesN * 0.55 + startsN * 0.35 + goalsBoost - cardPenalty;
+  // Starts weighted heavier than minutes — starting shows manager trust
+  const base = minutesN * 0.35 + startsN * 0.55 + goalsBoost - cardPenalty;
 
   return Math.max(0, Math.round(base * 100));
 }
@@ -120,8 +142,19 @@ function sideRating(side: { starters: any[]; bench: any[] }, sideStrength: numbe
   const starterSum = side.starters.reduce((s, p) => s + Number(p.importance ?? 0), 0);
   const benchSum = side.bench.reduce((s, p) => s + Number(p.importance ?? 0), 0);
 
+  // Blend historical team strength with actual lineup quality.
+  // The weaker the lineup relative to expectations, the more lineup quality dominates.
+  // A full-strength side: history matters more. A youth/weakened side: lineup dominates.
+  const avgStarterImp = side.starters.length > 0 ? (starterSum / side.starters.length) / 100 : 0.5;
+  const histStrength = Number.isFinite(sideStrength) ? sideStrength : 0.5;
+  // If avg importance is well below historical strength, lineup is clearly weakened — weight it more
+  const lineupGap = Math.max(0, histStrength - avgStarterImp); // 0 = full strength, 1 = totally weak
+  const lineupWeight = clamp01(0.40 + lineupGap * 0.60); // 0.40 normally → up to 1.0 for very weak lineups
+  const histWeight = 1 - lineupWeight;
+  const effectiveStrength = clamp01(histStrength * histWeight + avgStarterImp * lineupWeight);
+
   const raw = starterSum + benchSum * 0.35;
-  const scaled = raw * (0.85 + 0.30 * (Number.isFinite(sideStrength) ? sideStrength : 0.5));
+  const scaled = raw * (0.85 + 0.30 * effectiveStrength);
 
   const startersKnown = side.starters.filter((p) => p.season != null).length;
   const coverage = side.starters.length ? startersKnown / side.starters.length : 0;
@@ -132,6 +165,7 @@ function sideRating(side: { starters: any[]; bench: any[] }, sideStrength: numbe
     raw: Math.round(raw),
     total: Math.round(scaled),
     coverage,
+    effectiveStrength,
   };
 }
 
@@ -152,18 +186,26 @@ function computeOverall(params: {
   const coverageN = clamp01(params.coverage);
   const missingN = clamp01(params.missingImpact / 650);
 
-  const overallN = 0.30 * tierN + 0.25 * strengthN + 0.35 * lineupN + 0.15 * coverageN - 0.05 * missingN;
+  // Rebalanced: tier weight reduced, lineup quality and strength boosted
+  const overallN = 0.18 * tierN
+                 + 0.30 * strengthN
+                 + 0.42 * lineupN
+                 + 0.10 * coverageN
+                 - 0.05 * missingN;
   return Math.round(clamp01(overallN) * 100);
 }
 
 function computeOdds(params: { homeOverall: number; awayOverall: number; homeTier: number | null; awayTier: number | null }) {
-  const diffOverall = (params.homeOverall - params.awayOverall) / 12;
+  const diffOverall = (params.homeOverall - params.awayOverall) / 14;
 
   const homeTier = Number.isFinite(Number(params.homeTier)) ? Number(params.homeTier) : 6;
   const awayTier = Number.isFinite(Number(params.awayTier)) ? Number(params.awayTier) : 6;
 
-  const tierAdv = clamp((awayTier - homeTier) * 0.85, -4, 4);
-  const z = diffOverall + tierAdv;
+  // Halved from 0.85 — tier already factored into overall, avoid double-counting
+  const tierAdv = clamp((awayTier - homeTier) * 0.40, -2.5, 2.5);
+  // Home advantage: worth ~0.45 on z-score in football modelling
+  const homeAdv = 0.40;
+  const z = diffOverall + tierAdv + homeAdv;
 
   const pHomeRaw = sigmoid(z);
   const pAwayRaw = 1 - pHomeRaw;
@@ -305,7 +347,6 @@ export async function GET(req: Request) {
 
   if (prevSeasonErr) return NextResponse.json({ error: prevSeasonErr.message }, { status: 500 });
 
-  // Best current season row per player (most minutes)
   // All current season rows per player (supports multiple clubs)
   const allRowsByPlayer = new Map<string, any[]>();
   for (const r of seasonRows ?? []) {
@@ -315,13 +356,13 @@ export async function GET(req: Request) {
     allRowsByPlayer.set(id, arr);
   }
 
-  // Best current row per player (most minutes, for importance calc)
+  // Best current row per player (most minutes, for fallback)
   const bestRowByPlayer = new Map<string, any>();
   for (const [id, rows] of allRowsByPlayer.entries()) {
     bestRowByPlayer.set(id, rows.reduce((a, b) => Number(a.minutes ?? 0) >= Number(b.minutes ?? 0) ? a : b));
   }
 
-  // All prev season rows per player (supports multiple clubs)
+  // All prev season rows per player
   const allPrevRowsByPlayer = new Map<string, any[]>();
   for (const r of prevSeasonRows ?? []) {
     const id = String((r as any).ksi_player_id);
@@ -330,7 +371,7 @@ export async function GET(req: Request) {
     allPrevRowsByPlayer.set(id, arr);
   }
 
-  // Best prev row per player (for importance calc)
+  // Best prev row per player (for fallback)
   const bestPrevRowByPlayer = new Map<string, any>();
   for (const [id, rows] of allPrevRowsByPlayer.entries()) {
     bestPrevRowByPlayer.set(id, rows.reduce((a, b) => Number(a.minutes ?? 0) >= Number(b.minutes ?? 0) ? a : b));
@@ -451,9 +492,11 @@ export async function GET(req: Request) {
               team_ksi_id: id,
               competition_tier: prevS?.tier ?? null,
               competition_name: (prev as any).competition_name ?? null,
+              competition_category: (prev as any).competition_category ?? null,
               position: prevS?.position ?? null,
               played: prevS?.played ?? 0,
               points: prevS?.points ?? 0,
+              league_size: prevLeagueSize ?? null,
             }
           : null,
       });
@@ -472,11 +515,19 @@ export async function GET(req: Request) {
   if (statTeamIds.length) {
     const { data: clubRows, error: clubErr } = await supabaseAdmin
       .from("computed_league_table")
-      .select("season_year, team_ksi_id, played, points, competition_tier, competition_name, position")
+      .select("season_year, team_ksi_id, ksi_competition_id, played, points, competition_tier, competition_name, competition_category, position")
       .in("season_year", [seasonYear, prevSeasonYear])
       .in("team_ksi_id", statTeamIds);
 
     if (clubErr) return NextResponse.json({ error: clubErr.message }, { status: 500 });
+
+    // Count how many teams are in each competition (= league size)
+    const clubLeagueSizeByComp = new Map<string, number>();
+    for (const r of clubRows ?? []) {
+      const compId = String((r as any).ksi_competition_id ?? "");
+      if (!compId) continue;
+      clubLeagueSizeByComp.set(compId, (clubLeagueSizeByComp.get(compId) ?? 0) + 1);
+    }
 
     const grouped = new Map<string, any[]>();
     for (const r of clubRows ?? []) {
@@ -492,15 +543,28 @@ export async function GET(req: Request) {
 
       const season = Number(best.season_year);
       const teamId = String(best.team_ksi_id);
+      const compId = String(best.ksi_competition_id ?? "");
+      const leagueSize = compId ? (clubLeagueSizeByComp.get(compId) ?? null) : null;
 
+      const ctxTier = Number.isFinite(Number(best.competition_tier)) ? Number(best.competition_tier) : null;
+      // Use tier-based league size — partial match data only has teams present in this match
+      function tierLeagueSize(tier: number | null): number | null {
+        if (tier === null) return null;
+        if (tier <= 3) return 12;
+        if (tier === 4) return 10;
+        if (tier === 5) return 8;
+        return null;
+      }
       clubCtxBySeasonTeam.set(`${season}-${teamId}`, {
         season_year: season,
         team_ksi_id: teamId,
-        competition_tier: Number.isFinite(Number(best.competition_tier)) ? Number(best.competition_tier) : null,
+        competition_tier: ctxTier,
         competition_name: best.competition_name ?? null,
+        competition_category: best.competition_category ?? null,
         position: Number.isFinite(Number(best.position)) ? Number(best.position) : null,
         played: Number(best.played ?? 0),
         points: Number(best.points ?? 0),
+        league_size: tierLeagueSize(ctxTier),
       });
     }
   }
@@ -553,25 +617,204 @@ export async function GET(req: Request) {
     return { lastNApps: take.length, lastNMinutes, lastNStarts };
   }
 
-  function enrich(p: LineupPlayer, side: "home" | "away") {
-    const r = bestRowByPlayer.get(String(p.ksi_player_id)) ?? null;
+  function calcWeightedImportance(
+    playerRows: any[],
+    seasonYearCtx: number,
+    goalsOverride?: number,
+    yellowsOverride?: number,
+    redsOverride?: number,
+  ) {
+    // Importance uses RAW minutes — no tier discount.
+    // A player who starts every game for Aldershot is just as "important to their team"
+    // as one who starts every game for Man City. Tier quality is handled by teamStrength.
+    // We do still pick the player's primary (highest) league to set the maxGames ceiling.
+    let totalMins = 0;
+    let totalStarts = 0;
+    let totalGoals = goalsOverride ?? 0;
+    let totalYellows = yellowsOverride ?? 0;
+    let totalReds = redsOverride ?? 0;
 
-    const minutes = Number(r?.minutes ?? 0);
-    const starts = Number(r?.starts ?? 0);
-    const goals = Number(r?.goals ?? 0);
-    const yellows = Number(r?.yellows ?? 0);
-    const reds = Number(r?.reds ?? 0);
+    let primaryTier = 99;
+    const weightedMinsByTier = new Map<string, number>();
+
+    for (const row of playerRows) {
+      const teamId = row.ksi_team_id ? String(row.ksi_team_id) : null;
+      const ctx = teamId ? clubCtxBySeasonTeam.get(`${seasonYearCtx}-${teamId}`) ?? null : null;
+      const tier = ctx?.competition_tier ?? null;
+      const t = Number.isFinite(Number(tier)) ? Number(tier) : 99;
+      const category = ctx?.competition_category ?? null;
+      // Must check ctx explicitly — null tier coerces to 0 via Number(null)
+      // which would incorrectly pass the t <= 5 senior check.
+      const isYouth = ctx === null
+        ? true  // no DB entry = untracked competition = treat as youth
+        : category === "U-19" || category === "U-20" ||
+          category === "U-21" || category === "U-17" || t > 5;
+      const youthDiscount = isYouth ? 0.35 : 1.0;
+      totalMins += Number(row.minutes ?? 0) * youthDiscount;
+      totalStarts += Number(row.starts ?? 0) * youthDiscount;
+
+      if (goalsOverride === undefined) totalGoals += Number(row.goals ?? 0) * youthDiscount;
+      if (yellowsOverride === undefined) totalYellows += Number(row.yellows ?? 0) * youthDiscount;
+      if (redsOverride === undefined) totalReds += Number(row.reds ?? 0) * youthDiscount;
+
+      // Track weighted minutes per tier to determine primary tier
+      // (tier with most weighted minutes = player's true primary competition)
+      const key = `tier-${t}`;
+      weightedMinsByTier.set(key, (weightedMinsByTier.get(key) ?? 0) + Number(row.minutes ?? 0) * youthDiscount);
+      // Still track highest tier seen for fallback
+      if (t < primaryTier) {
+        primaryTier = t;
+      }
+    }
+
+    // Derive primary tier = tier where player spent most weighted minutes
+    // This avoids a player with 29 token senior minutes getting a Tier 1 ceiling
+    if (weightedMinsByTier.size > 0) {
+      let maxWMins = 0;
+      for (const [key, wmins] of weightedMinsByTier.entries()) {
+        if (wmins > maxWMins) {
+          maxWMins = wmins;
+          primaryTier = Number(key.replace("tier-", ""));
+        }
+      }
+    }
+
+    // Use tier-based maxGames — league size from partial match data is unreliable
+    // since we only fetch teams present in this specific match, not the full competition.
+    // Based on actual Icelandic league structures:
+    // Tier 1 (Besta deild): 12 teams = 22 games
+    // Tier 2 (Lengjudeild): 12 teams = 22 games
+    // Tier 3 (2. deild): 12 teams = 22 games
+    // Tier 4 (3. deild): 10 teams = 18 games
+    // Tier 5 (4. deild): 8 teams = 14 games
+    // U19 (Íslandsmót 2. flokkur karla): 3 rounds of 9 games = 27 max
+    function maxGamesForTier(tier: number, isYouthComp: boolean): number {
+      if (isYouthComp) return 27; // U19: 3 rounds × 9 games
+      if (tier <= 3) return 22;   // Tiers 1-3: 12 teams
+      if (tier === 4) return 18;  // 3. deild: 10 teams
+      if (tier === 5) return 14;  // 4. deild: 8 teams
+      return 22;                  // safe fallback
+    }
+    const isPrimaryYouth = primaryTier >= 6;
+    const maxGames = primaryTier < 99 ? maxGamesForTier(primaryTier, isPrimaryYouth) : 22;
+
+    const rawImportance = calcImportance({
+      minutes: totalMins,
+      starts: totalStarts,
+      goals: totalGoals,
+      yellows: totalYellows,
+      reds: totalReds,
+      maxGames,
+    });
+
+    // Apply tier+position ceiling.
+    // Base ceilings per tier — big gaps to reflect quality difference.
+    // Position within tier bridges up to 50% toward the tier above/below.
+    function tierBaseCeiling(tier: number, isYouth: boolean): number {
+      if (isYouth) return 25;
+      if (tier <= 1) return 92;  // 93-100 reserved for exceptional (goals+full season)
+      if (tier === 2) return 78;
+      if (tier === 3) return 64;
+      if (tier === 4) return 50;
+      if (tier === 5) return 36;
+      return 25;
+    }
+
+    let importanceCeiling = 100;
+    if (primaryTier < 99) {
+      const baseCeiling = tierBaseCeiling(primaryTier, isPrimaryYouth);
+      const tierAboveCeiling = tierBaseCeiling(primaryTier - 1, false);
+      const tierBelowCeiling = tierBaseCeiling(primaryTier + 1, false);
+
+      // Find position context for primary club
+      const primaryCtxEntry = [...playerRows]
+        .map((r: any) => ({
+          teamId: String(r.ksi_team_id ?? ""),
+          ctx: clubCtxBySeasonTeam.get(`${seasonYearCtx}-${String(r.ksi_team_id ?? "")}`)
+        }))
+        .filter(x => x.ctx && (x.ctx.competition_tier ?? 99) === primaryTier)[0];
+
+      // Use tier-based league size for position factor — partial match data is unreliable for league_size
+      function leagueSizeForTier(tier: number): number {
+        if (tier <= 3) return 12;
+        if (tier === 4) return 10;
+        if (tier === 5) return 8;
+        return 10;
+      }
+      if (primaryCtxEntry?.ctx?.position != null) {
+        const pos = primaryCtxEntry.ctx.position;
+        const size = leagueSizeForTier(primaryTier);
+        // positionFactor: 1.0 = top, 0.0 = bottom
+        const positionFactor = (size - pos) / (size - 1);
+        const adjustment = positionFactor >= 0.5
+          ? (tierAboveCeiling - baseCeiling) * (positionFactor - 0.5)  // top half: bridge toward tier above
+          : (tierBelowCeiling - baseCeiling) * (0.5 - positionFactor); // bottom half: bridge toward tier below
+        importanceCeiling = Math.round(baseCeiling + adjustment);
+      } else {
+        importanceCeiling = baseCeiling;
+      }
+    }
+
+    return { importance: Math.min(rawImportance, importanceCeiling), ceiling: importanceCeiling };
+  }
+
+  function enrich(p: LineupPlayer, side: "home" | "away") {
+    const sideTeamId = side === "home" ? homeTeamId : awayTeamId;
+
+    const playerRows = allRowsByPlayer.get(String(p.ksi_player_id)) ?? [];
+    const prevPlayerRows = allPrevRowsByPlayer.get(String(p.ksi_player_id)) ?? [];
+
+    // For display: prefer the row from today's team, fallback to most minutes
+    const teamRow = sideTeamId ? playerRows.find((row: any) => String(row.ksi_team_id) === sideTeamId) ?? null : null;
+    const r = teamRow ?? (playerRows.length > 0 ? playerRows.reduce((a: any, b: any) => Number(a.minutes ?? 0) >= Number(b.minutes ?? 0) ? a : b) : null);
 
     const statTeamId = r?.ksi_team_id ? String(r.ksi_team_id) : null;
-
     const seasonClubCtx = statTeamId ? clubCtxBySeasonTeam.get(`${seasonYear}-${statTeamId}`) ?? null : null;
 
     const sideStrength = side === "home" ? homeStrength : awayStrength;
     const strength = statTeamId ? (strengthByTeam.get(statTeamId) ?? 0.5) : sideStrength;
 
+    // Importance: blend current and previous season using sliding scale.
+    // The less current data exists, the more previous season counts (up to 30%).
+    // Players with no current data fall back to prev season only.
+    const currResult = playerRows.length > 0
+      ? calcWeightedImportance(playerRows, seasonYear)
+      : null;
+    const prevResult = prevPlayerRows.length > 0
+      ? calcWeightedImportance(prevPlayerRows, prevSeasonYear)
+      : null;
+
+    let importance = 0;
+    let importanceCeiling = currResult?.ceiling ?? prevResult?.ceiling ?? 100;
+    if (currResult !== null && prevResult !== null) {
+      // Sliding scale: prevWeight = 0.30 at 0 curr mins → 0 at 500+ curr mins
+      const currMins = playerRows.reduce((sum: number, r: any) => sum + Number(r.minutes ?? 0), 0);
+      const prevWeight = Math.max(0, 1 - (currMins / 500)) * 0.30;
+      importance = Math.round(currResult.importance * (1 - prevWeight) + prevResult.importance * prevWeight);
+    } else if (currResult !== null) {
+      importance = currResult.importance;
+    } else if (prevResult !== null) {
+      importance = prevResult.importance;
+      importanceCeiling = prevResult.ceiling;
+    }
+    if (String(p.ksi_player_id) === "55994") {
+
+
+      // Manually trace the importance calc
+      for (const row of playerRows) {
+        const tid = row.ksi_team_id ? String(row.ksi_team_id) : null;
+        const ctx2 = tid ? clubCtxBySeasonTeam.get(`${seasonYear}-${tid}`) ?? null : null;
+        const tier2 = ctx2?.competition_tier ?? null;
+        const t2 = Number.isFinite(Number(tier2)) ? Number(tier2) : 99;
+        const cat2 = ctx2?.competition_category ?? null;
+        const isYouth2 = ctx2 === null ? true : cat2 === "U-19" || cat2 === "U-20" || cat2 === "U-21" || cat2 === "U-17" || t2 > 5;
+        const discount2 = isYouth2 ? 0.35 : 1.0;
+      }
+    }
+
     // All prev season clubs for this player
-    const prevSeasons = (allPrevRowsByPlayer.get(String(p.ksi_player_id)) ?? [])
-      .sort((a, b) => Number(b.minutes ?? 0) - Number(a.minutes ?? 0))
+    const prevSeasons = prevPlayerRows
+      .sort((a: any, b: any) => Number(b.minutes ?? 0) - Number(a.minutes ?? 0))
       .map((pr: any) => {
         const prevTeamId = pr?.ksi_team_id ? String(pr.ksi_team_id) : null;
         const prevClubCtx = prevTeamId ? clubCtxBySeasonTeam.get(`${prevSeasonYear}-${prevTeamId}`) ?? null : null;
@@ -590,15 +833,11 @@ export async function GET(req: Request) {
         };
       });
 
-    const seasons = (allRowsByPlayer.get(String(p.ksi_player_id)) ?? [])
-  
-      .sort((a, b) => Number(b.minutes ?? 0) - Number(a.minutes ?? 0))
+    const seasons = playerRows
+      .sort((a: any, b: any) => Number(b.minutes ?? 0) - Number(a.minutes ?? 0))
       .map((sr: any) => {
         const sTeamId = sr?.ksi_team_id ? String(sr.ksi_team_id) : null;
         const sClubCtx = sTeamId ? clubCtxBySeasonTeam.get(`${seasonYear}-${sTeamId}`) ?? null : null;
-        if (p.ksi_player_id === "70651") {
-  console.log("seasons for 70651:", allRowsByPlayer.get("70651"));
-}
         return {
           season_year: seasonYear,
           ksi_team_id: sTeamId,
@@ -623,9 +862,8 @@ export async function GET(req: Request) {
       seasons,
       prevSeasons,
       recent5: lastN(String(p.ksi_player_id), 5),
-      importance: r ? calcImportance({
-        minutes, starts, goals, yellows, reds,
-      }) : 0,
+      importance,
+      importanceCeiling,
     };
   }
 
@@ -671,31 +909,29 @@ export async function GET(req: Request) {
       missingBirthById.set(String(r.ksi_player_id), r.birth_year ?? null);
     }
 
-    const sideStrength = side === "home" ? homeStrength : awayStrength;
+    // Group missing player rows by player id for weighted importance
+    const missingRowsByPlayer = new Map<string, any[]>();
+    for (const r of missRows ?? []) {
+      const pid = String(r.ksi_player_id);
+      const arr = missingRowsByPlayer.get(pid) ?? [];
+      arr.push(r);
+      missingRowsByPlayer.set(pid, arr);
+    }
 
-    // Get club ctx for the team to pass tier to calcImportance
-    const teamClubCtx = clubCtxBySeasonTeam.get(`${seasonYear}-${teamId}`) ?? null;
-
-    const missing = (missRows ?? []).map((r: any) => {
-      const minutes = Number(r.minutes ?? 0);
-      const starts = Number(r.starts ?? 0);
-      const goals = Number(r.goals ?? 0);
-      const yellows = Number(r.yellows ?? 0);
-      const reds = Number(r.reds ?? 0);
+    const missing = Array.from(missingRowsByPlayer.entries()).map(([pid, rows]) => {
+      const best = rows.reduce((a, b) => Number(a.minutes ?? 0) >= Number(b.minutes ?? 0) ? a : b);
+      const { importance } = calcWeightedImportance(rows, seasonYear);
 
       return {
-        ksi_player_id: String(r.ksi_player_id),
-        player_name: r.player_name ?? null,
-        birth_year: missingBirthById.get(String(r.ksi_player_id)) ?? null,
-        starts,
-        minutes,
-        goals,
-        importance: calcImportance({
-          minutes, starts, goals, yellows, reds,
-        }),
+        ksi_player_id: pid,
+        player_name: best.player_name ?? null,
+        birth_year: missingBirthById.get(pid) ?? null,
+        starts: rows.reduce((s: number, r: any) => s + Number(r.starts ?? 0), 0),
+        minutes: rows.reduce((s: number, r: any) => s + Number(r.minutes ?? 0), 0),
+        goals: rows.reduce((s: number, r: any) => s + Number(r.goals ?? 0), 0),
+        importance,
       };
     });
-    
 
     const missingImpact = missing.reduce((s, p) => s + Number(p.importance ?? 0), 0);
     missing.sort((a, b) => (b.importance ?? 0) - (a.importance ?? 0));
@@ -709,7 +945,7 @@ export async function GET(req: Request) {
   const awayRating = sideRating(away, awayStrength);
 
   const homeOverall = computeOverall({
-    teamStrength: homeStrength,
+    teamStrength: homeRating.effectiveStrength,
     tier: homeTier,
     total: homeRating.total,
     coverage: homeRating.coverage,
@@ -717,7 +953,7 @@ export async function GET(req: Request) {
   });
 
   const awayOverall = computeOverall({
-    teamStrength: awayStrength,
+    teamStrength: awayRating.effectiveStrength,
     tier: awayTier,
     total: awayRating.total,
     coverage: awayRating.coverage,
@@ -731,7 +967,7 @@ export async function GET(req: Request) {
     season_year: seasonYear,
     teams,
 
-    teamStrength: { home: homeStrength, away: awayStrength },
+    teamStrength: { home: homeRating.effectiveStrength, away: awayRating.effectiveStrength },
     teamStrengthDebug: {
       home: homeTeamId ? teamStrengthDebug.get(homeTeamId) ?? null : null,
       away: awayTeamId ? teamStrengthDebug.get(awayTeamId) ?? null : null,

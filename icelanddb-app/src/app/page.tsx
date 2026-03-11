@@ -554,10 +554,13 @@ function PlayerAnalysisTable({ title, rows, accent }: { title: string; rows: any
               rows.map((p) => {
                 const isOpen = expanded.has(p.ksi_player_id);
                 const imp = p.importance ?? 0;
-                const impColor = imp >= 80 ? "text-emerald-400" : imp >= 50 ? "text-yellow-400" : imp >= 25 ? "text-white/70" : "text-white/30";
-                const rowHighlight = imp >= 80
+                const ceiling = p.importanceCeiling ?? 100;
+                // Colour relative to tier ceiling — 80%+ of ceiling = green, 55-79% = yellow, else dim
+                const impRatio = ceiling > 0 ? imp / ceiling : 0;
+                const impColor = impRatio >= 0.75 ? "text-emerald-400" : impRatio >= 0.55 ? "text-yellow-400" : imp >= 15 ? "text-white/70" : "text-white/30";
+                const rowHighlight = impRatio >= 0.75
                   ? `border-l-2 ${accentBorder === "border-l-blue-500" ? "border-l-emerald-500" : "border-l-emerald-500"} bg-emerald-950/20`
-                  : imp >= 50
+                  : impRatio >= 0.55
                   ? `border-l-2 border-l-yellow-500/50 bg-yellow-950/10`
                   : "";
 
@@ -591,8 +594,13 @@ function PlayerAnalysisTable({ title, rows, accent }: { title: string; rows: any
                       <td className="px-3 py-2.5 text-right hidden sm:table-cell">
                         <FormDots recent5={p.recent5} />
                       </td>
-                      <td className={clsx("px-3 py-2.5 text-right font-bold text-sm font-mono", impColor)}>
-                        {imp > 0 ? imp : <span className="text-white/20">—</span>}
+                      <td className={clsx("px-3 py-2.5 text-right font-mono", impColor)}>
+                        {imp > 0 ? (
+                          <div className="flex flex-col items-end leading-none">
+                            <span className="font-bold text-sm">{imp}</span>
+                            <span className="text-xs opacity-40 mt-0.5">/{ceiling}</span>
+                          </div>
+                        ) : <span className="text-white/20">—</span>}
                       </td>
                     </tr>
                     {isOpen && (
