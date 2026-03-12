@@ -95,18 +95,36 @@ function tierWeightForStrength(tier: number | null): number {
   return 0.08;
 }
 
-function tierScale(tier: number) {
+function isWomensCompetition(name: string | null | undefined): boolean {
+  return !!name && /kvenna/i.test(name);
+}
+
+// Women's pyramid is much steeper — T1 near-professional, T2+ semi-amateur
+function tierScale(tier: number, women = false) {
   const t = Number.isFinite(tier) ? tier : 99;
   if (t <= 1) return 1.0;
+  if (women) {
+    if (t === 2) return 0.25;
+    if (t === 3) return 0.06;
+    if (t === 4) return 0.03;
+    return 0.02;
+  }
   if (t === 2) return 0.78;
   if (t === 3) return 0.58;
   if (t === 4) return 0.43;
   return 0.32;
 }
 
-function tierQualityN(tier: number | null | undefined) {
+function tierQualityN(tier: number | null | undefined, women = false) {
   const t = Number.isFinite(Number(tier)) ? Number(tier) : 6;
   if (t <= 1) return 1.0;
+  if (women) {
+    if (t === 2) return 0.25;
+    if (t === 3) return 0.06;
+    if (t === 4) return 0.03;
+    if (t === 5) return 0.02;
+    return 0.01;
+  }
   if (t === 2) return 0.78;
   if (t === 3) return 0.58;
   if (t === 4) return 0.43;
@@ -126,32 +144,41 @@ function calcImportance(params: {
   const minutesN = clamp01(params.minutes / maxMins);
   const startsN = clamp01(params.starts / params.maxGames);
 
-  // Minutes is the dominant signal (65%). Starts add texture (25%).
-  // Goals give a small boost — toned down so a 4-goal squad player
-  // doesn't outscore a full-season regular with 0 goals.
-  const goalsBoost = clamp01(params.goals / 20) * 0.10;
+  // Minutes + starts are the dominant signals, unchanged.
+  // Goals added on top — not replacing other weight, so prolific scorers get
+  // a genuine boost without penalising non-scoring regulars.
+  // 8 goals → +0.10 boost, 12+ goals → full +0.15
+  const goalsBoost = clamp01(params.goals / 12) * 0.15;
   const cardPenalty = clamp01(params.yellows * 0.02 + params.reds * 0.08);
 
-  // Starts weighted heavier than minutes — starting shows manager trust
   const base = minutesN * 0.35 + startsN * 0.55 + goalsBoost - cardPenalty;
 
   return Math.max(0, Math.round(base * 100));
 }
 
-function sideRating(side: { starters: any[]; bench: any[] }, sideStrength: number) {
+function sideRating(side: { starters: any[]; bench: any[] }, sideStrength: number, missingImpact = 0) {
   const starterSum = side.starters.reduce((s, p) => s + Number(p.importance ?? 0), 0);
   const benchSum = side.bench.reduce((s, p) => s + Number(p.importance ?? 0), 0);
 
-  // Blend historical team strength with actual lineup quality.
-  // The weaker the lineup relative to expectations, the more lineup quality dominates.
-  // A full-strength side: history matters more. A youth/weakened side: lineup dominates.
-  const avgStarterImp = side.starters.length > 0 ? (starterSum / side.starters.length) / 100 : 0.5;
+  // avgStarterImp: penalise for missing players relative to expected squad size.
+  // missingRatio = what fraction of the full expected squad's quality is absent.
+  // This preserves the difference between teams — a team with better actual starters
+  // AND fewer missing players rates higher than one with weaker starters AND more missing.
+  const presentAvg = side.starters.length > 0 ? starterSum / side.starters.length : 0;
+  const expectedTotal = starterSum + missingImpact;
+  const missingRatio = expectedTotal > 0 ? clamp01(missingImpact / expectedTotal) : 0;
+  // Scale present avg down by missing ratio — more missing = bigger penalty
+  const avgStarterImp = clamp01((presentAvg / 100) * (1 - missingRatio));
   const histStrength = Number.isFinite(sideStrength) ? sideStrength : 0.5;
   // If avg importance is well below historical strength, lineup is clearly weakened — weight it more
   const lineupGap = Math.max(0, histStrength - avgStarterImp); // 0 = full strength, 1 = totally weak
   const lineupWeight = clamp01(0.40 + lineupGap * 0.60); // 0.40 normally → up to 1.0 for very weak lineups
   const histWeight = 1 - lineupWeight;
-  const effectiveStrength = clamp01(histStrength * histWeight + avgStarterImp * lineupWeight);
+  // Further cap history contribution based on missing ratio — if 40%+ of squad is missing,
+  // history becomes increasingly unreliable as a predictor of today's performance.
+  const historyCap = clamp01(1 - missingRatio * 1.5);
+  const cappedHistStrength = histStrength * historyCap;
+  const effectiveStrength = clamp01(cappedHistStrength * histWeight + avgStarterImp * lineupWeight);
 
   const raw = starterSum + benchSum * 0.35;
   const scaled = raw * (0.85 + 0.30 * effectiveStrength);
@@ -179,33 +206,85 @@ function computeOverall(params: {
   total: number;
   coverage: number;
   missingImpact: number;
+  women?: boolean;
 }) {
   const strengthN = clamp01(params.teamStrength);
-  const tierN = clamp01(tierQualityN(params.tier));
+  const tierN = clamp01(tierQualityN(params.tier, params.women));
   const lineupN = clamp01(params.total / 800);
   const coverageN = clamp01(params.coverage);
-  const missingN = clamp01(params.missingImpact / 650);
+  // Normalise missing impact relative to tier ceiling — a missing 49-rated T4 player
+  // is proportionally as damaging as a missing 78-rated T2 player.
+  // Use ~4 missing regulars at tier ceiling as the "fully depleted" baseline.
+  function tierCeilingForMissing(tier: number | null, women: boolean): number {
+    const t = Number.isFinite(Number(tier)) ? Number(tier) : 3;
+    if (t <= 1) return 92;
+    if (women) return t <= 2 ? 78 : 25;
+    if (t === 2) return 78;
+    if (t === 3) return 64;
+    if (t === 4) return 50;
+    if (t === 5) return 36;
+    return 25;
+  }
+  const tierCeiling = tierCeilingForMissing(params.tier, params.women ?? false);
+  const missingN = clamp01(params.missingImpact / (tierCeiling * 4));
 
   // Rebalanced: tier weight reduced, lineup quality and strength boosted
   const overallN = 0.18 * tierN
                  + 0.30 * strengthN
                  + 0.42 * lineupN
                  + 0.10 * coverageN
-                 - 0.05 * missingN;
+                 - 0.12 * missingN;
   return Math.round(clamp01(overallN) * 100);
 }
 
-function computeOdds(params: { homeOverall: number; awayOverall: number; homeTier: number | null; awayTier: number | null }) {
-  const diffOverall = (params.homeOverall - params.awayOverall) / 14;
-
+function computeOdds(params: {
+  homeOverall: number; awayOverall: number;
+  homeTier: number | null; awayTier: number | null;
+  homeRawStrength: number; awayRawStrength: number;
+  homeLineupTotal: number; awayLineupTotal: number;
+  homeMissingImpact: number; awayMissingImpact: number;
+}) {
   const homeTier = Number.isFinite(Number(params.homeTier)) ? Number(params.homeTier) : 6;
   const awayTier = Number.isFinite(Number(params.awayTier)) ? Number(params.awayTier) : 6;
 
-  // Halved from 0.85 — tier already factored into overall, avoid double-counting
-  const tierAdv = clamp((awayTier - homeTier) * 0.40, -2.5, 2.5);
-  // Home advantage: worth ~0.45 on z-score in football modelling
-  const homeAdv = 0.40;
-  const z = diffOverall + tierAdv + homeAdv;
+  // Primary signal: effective team strength (blends historical strength with actual lineup quality)
+  // effectiveStrength already accounts for missing players via sideRating's missingRatio penalty
+  const rawStrengthDiff = clamp(params.homeRawStrength - params.awayRawStrength, -1, 1);
+  const strengthZ = rawStrengthDiff * 6.5;
+
+  // Secondary signal: lineup quality modifier — how does today's lineup compare to expected?
+  // Baseline is tier-relative: a full-strength T1 side scores ~726, T2 ~580, T3 ~460 etc.
+  // This prevents a T2 team's normal lineup from looking "weakened" against a T1 baseline.
+  function lineupBaselineForTier(tier: number): number {
+    if (tier <= 1) return 726;
+    if (tier === 2) return 580;
+    if (tier === 3) return 460;
+    if (tier === 4) return 360;
+    return 280;
+  }
+  const homeBaseline = lineupBaselineForTier(homeTier);
+  const awayBaseline = lineupBaselineForTier(awayTier);
+  // Wider clamp range: allow a truly devastated lineup (-1.0) to make a real difference
+  // Subtract missing impact from effective lineup total — missing players hurt lineup quality
+  const homeEffectiveTotal = Math.max(0, params.homeLineupTotal - params.homeMissingImpact * 0.8);
+  const awayEffectiveTotal = Math.max(0, params.awayLineupTotal - params.awayMissingImpact * 0.8);
+  const homeLineupMod = clamp((homeEffectiveTotal - homeBaseline) / homeBaseline, -1.0, 0.3);
+  const awayLineupMod = clamp((awayEffectiveTotal - awayBaseline) / awayBaseline, -1.0, 0.3);
+  const lineupZ = (homeLineupMod - awayLineupMod) * 2.0;
+
+  // Tier cross-match adjustment (lower tier team away gets slight penalty)
+  // But reduce this if the away team's lineup is significantly below their tier baseline —
+  // a T1 team fielding a youth squad shouldn't get a tier bonus over a full-strength T2 side.
+  // Tier advantage is structural — a T3 team playing T4 retains that quality gap
+  // even when missing players. Don't dampen by lineup ratio.
+  const tierAdv = clamp((awayTier - homeTier) * 0.50, -2.0, 2.0);
+
+  // Home advantage scales strongly with tier — at T1 it's meaningful (crowd, travel),
+  // at T4/T5 amateur level teams often share pitches and there's no real home advantage.
+  const avgTier = ((homeTier ?? 3) + (awayTier ?? 3)) / 2;
+  const homeAdv = clamp(0.40 - (avgTier - 1) * 0.10, 0.05, 0.40);
+
+  const z = strengthZ + lineupZ + tierAdv + homeAdv;
 
   const pHomeRaw = sigmoid(z);
   const pAwayRaw = 1 - pHomeRaw;
@@ -256,10 +335,11 @@ function strengthFromRow(row: any, leagueSize: number | null) {
   const points = Number(row.points ?? 0);
   const tier = Number(row.competition_tier ?? 99);
   const position = Number.isFinite(Number(row.position)) ? Number(row.position) : null;
+  const women = isWomensCompetition(row.competition_name);
 
   const ppm = played > 0 ? points / played : 0;
   const base = clamp01(ppm / 3);
-  const scale = tierScale(tier);
+  const scale = tierScale(tier, women);
   const posMul = posMultiplier(position, leagueSize);
 
   return {
@@ -317,35 +397,36 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "No players parsed from lineups" }, { status: 200 });
   }
 
-  // Fetch birth years from players table
-  const { data: playerBirthRows, error: birthErr } = await supabaseAdmin
-    .from("players")
-    .select("ksi_player_id, birth_year")
-    .in("ksi_player_id", allIds);
+  // Batch 1: fetch birth years + current + prev season stats in parallel
+  const [
+    { data: playerBirthRows, error: birthErr },
+    { data: seasonRows, error: seasonErr },
+    { data: prevSeasonRows, error: prevSeasonErr },
+  ] = await Promise.all([
+    supabaseAdmin
+      .from("players")
+      .select("ksi_player_id, birth_year")
+      .in("ksi_player_id", allIds),
+    supabaseAdmin
+      .from("player_season_to_date")
+      .select("season_year, ksi_team_id, ksi_player_id, player_name, matches_played, starts, minutes, goals, yellows, reds")
+      .eq("season_year", seasonYear)
+      .in("ksi_player_id", allIds),
+    supabaseAdmin
+      .from("player_season_to_date")
+      .select("season_year, ksi_team_id, ksi_player_id, player_name, matches_played, starts, minutes, goals, yellows, reds")
+      .eq("season_year", prevSeasonYear)
+      .in("ksi_player_id", allIds),
+  ]);
 
   if (birthErr) return NextResponse.json({ error: birthErr.message }, { status: 500 });
+  if (seasonErr) return NextResponse.json({ error: seasonErr.message }, { status: 500 });
+  if (prevSeasonErr) return NextResponse.json({ error: prevSeasonErr.message }, { status: 500 });
 
   const birthYearById = new Map<string, number | null>();
   for (const r of playerBirthRows ?? []) {
     birthYearById.set(String(r.ksi_player_id), r.birth_year ?? null);
   }
-
-  // 2) Player season rows: current + previous
-  const { data: seasonRows, error: seasonErr } = await supabaseAdmin
-    .from("player_season_to_date")
-    .select("season_year, ksi_team_id, ksi_player_id, player_name, matches_played, starts, minutes, goals, yellows, reds")
-    .eq("season_year", seasonYear)
-    .in("ksi_player_id", allIds);
-
-  if (seasonErr) return NextResponse.json({ error: seasonErr.message }, { status: 500 });
-
-  const { data: prevSeasonRows, error: prevSeasonErr } = await supabaseAdmin
-    .from("player_season_to_date")
-    .select("season_year, ksi_team_id, ksi_player_id, player_name, matches_played, starts, minutes, goals, yellows, reds")
-    .eq("season_year", prevSeasonYear)
-    .in("ksi_player_id", allIds);
-
-  if (prevSeasonErr) return NextResponse.json({ error: prevSeasonErr.message }, { status: 500 });
 
   // All current season rows per player (supports multiple clubs)
   const allRowsByPlayer = new Map<string, any[]>();
@@ -413,17 +494,30 @@ export async function GET(req: Request) {
   const teamIdsToLoad = Array.from(new Set([homeTeamId, awayTeamId, ...statTeamIds].filter(Boolean))) as string[];
 
   const strengthByTeam = new Map<string, number>();
+  const compNameByTeam = new Map<string, string>();
   const tierByTeam = new Map<string, number>();
   const teamStrengthDebug = new Map<string, TeamStrengthDebugRow>();
 
   if (teamIdsToLoad.length) {
-    const { data: curRows, error: curErr } = await supabaseAdmin
-      .from("computed_league_table")
-      .select("season_year, team_ksi_id, ksi_competition_id, played, points, competition_tier, competition_name, position")
-      .eq("season_year", seasonYear)
-      .in("team_ksi_id", teamIdsToLoad);
+    // Batch 2: cur + prev team strength in parallel
+    const [
+      { data: curRows, error: curErr },
+      { data: prevRows, error: prevErr },
+    ] = await Promise.all([
+      supabaseAdmin
+        .from("computed_league_table")
+        .select("season_year, team_ksi_id, ksi_competition_id, played, points, competition_tier, competition_name, position")
+        .eq("season_year", seasonYear)
+        .in("team_ksi_id", teamIdsToLoad),
+      supabaseAdmin
+        .from("computed_league_table")
+        .select("season_year, team_ksi_id, ksi_competition_id, played, points, competition_tier, competition_name, position")
+        .eq("season_year", prevSeasonYear)
+        .in("team_ksi_id", teamIdsToLoad),
+    ]);
 
     if (curErr) return NextResponse.json({ error: curErr.message }, { status: 500 });
+    if (prevErr) return NextResponse.json({ error: prevErr.message }, { status: 500 });
 
     const leagueSizeByComp = new Map<string, number>();
     for (const r of curRows ?? []) {
@@ -433,14 +527,6 @@ export async function GET(req: Request) {
     }
 
     const bestCur = pickBestRowPerTeam(curRows ?? []);
-
-    const { data: prevRows, error: prevErr } = await supabaseAdmin
-      .from("computed_league_table")
-      .select("season_year, team_ksi_id, ksi_competition_id, played, points, competition_tier, competition_name, position")
-      .eq("season_year", prevSeasonYear)
-      .in("team_ksi_id", teamIdsToLoad);
-
-    if (prevErr) return NextResponse.json({ error: prevErr.message }, { status: 500 });
 
     const prevLeagueSizeByComp = new Map<string, number>();
     for (const r of prevRows ?? []) {
@@ -474,6 +560,8 @@ export async function GET(req: Request) {
 
       const tier = curS?.tier ?? prevS?.tier ?? null;
       if (tier != null) tierByTeam.set(id, tier);
+      const compName = cur?.competition_name ?? null;
+      if (compName) compNameByTeam.set(id, compName);
 
       teamStrengthDebug.set(id, {
         team_ksi_id: id,
@@ -508,18 +596,35 @@ export async function GET(req: Request) {
 
   const homeTier = homeTeamId ? (tierByTeam.get(homeTeamId) ?? null) : null;
   const awayTier = awayTeamId ? (tierByTeam.get(awayTeamId) ?? null) : null;
+  const homeCompName = homeTeamId ? (compNameByTeam.get(homeTeamId) ?? null) : null;
+  const awayCompName = awayTeamId ? (compNameByTeam.get(awayTeamId) ?? null) : null;
+  const isWomen = isWomensCompetition(homeCompName) || isWomensCompetition(awayCompName);
 
   // Player club context
   const clubCtxBySeasonTeam = new Map<string, TeamSeasonContext>();
 
-  if (statTeamIds.length) {
-    const { data: clubRows, error: clubErr } = await supabaseAdmin
-      .from("computed_league_table")
-      .select("season_year, team_ksi_id, ksi_competition_id, played, points, competition_tier, competition_name, competition_category, position")
-      .in("season_year", [seasonYear, prevSeasonYear])
-      .in("team_ksi_id", statTeamIds);
+  // Batch 3: club context + recent lineups in parallel (both independent at this point)
+  const [clubRowsResult, lineupRowsResult] = await Promise.all([
+    statTeamIds.length
+      ? supabaseAdmin
+          .from("computed_league_table")
+          .select("season_year, team_ksi_id, ksi_competition_id, played, points, competition_tier, competition_name, competition_category, position")
+          .in("season_year", [seasonYear, prevSeasonYear])
+          .in("team_ksi_id", statTeamIds)
+      : Promise.resolve({ data: [], error: null }),
+    supabaseAdmin
+      .from("match_lineups")
+      .select("ksi_player_id, ksi_match_id, minute_in, minute_out")
+      .in("ksi_player_id", allIds),
+  ]);
 
-    if (clubErr) return NextResponse.json({ error: clubErr.message }, { status: 500 });
+  const { data: clubRows, error: clubErr } = clubRowsResult;
+  const { data: lineupRows, error: lineupErr } = lineupRowsResult;
+
+  if (clubErr) return NextResponse.json({ error: clubErr.message }, { status: 500 });
+  if (lineupErr) return NextResponse.json({ error: lineupErr.message }, { status: 500 });
+
+  if (statTeamIds.length) {
 
     // Count how many teams are in each competition (= league size)
     const clubLeagueSizeByComp = new Map<string, number>();
@@ -569,14 +674,7 @@ export async function GET(req: Request) {
     }
   }
 
-  // 4) Recent form
-  const { data: lineupRows, error: lineupErr } = await supabaseAdmin
-    .from("match_lineups")
-    .select("ksi_player_id, ksi_match_id, minute_in, minute_out")
-    .in("ksi_player_id", allIds);
-
-  if (lineupErr) return NextResponse.json({ error: lineupErr.message }, { status: 500 });
-
+  // 4) Recent form (lineupRows already fetched in batch 3 above)
   const matchIds = Array.from(new Set((lineupRows ?? []).map((r: any) => String(r.ksi_match_id)).filter(Boolean)));
 
   const kickoffMap = new Map<string, number>();
@@ -653,7 +751,8 @@ export async function GET(req: Request) {
       totalMins += Number(row.minutes ?? 0) * youthDiscount;
       totalStarts += Number(row.starts ?? 0) * youthDiscount;
 
-      if (goalsOverride === undefined) totalGoals += Number(row.goals ?? 0) * youthDiscount;
+      // Youth goals excluded entirely — they don't reflect senior threat level
+      if (goalsOverride === undefined && !isYouth) totalGoals += Number(row.goals ?? 0);
       if (yellowsOverride === undefined) totalYellows += Number(row.yellows ?? 0) * youthDiscount;
       if (redsOverride === undefined) totalReds += Number(row.reds ?? 0) * youthDiscount;
 
@@ -667,16 +766,41 @@ export async function GET(req: Request) {
       }
     }
 
-    // Derive primary tier = tier where player spent most weighted minutes
-    // This avoids a player with 29 token senior minutes getting a Tier 1 ceiling
-    if (weightedMinsByTier.size > 0) {
-      let maxWMins = 0;
-      for (const [key, wmins] of weightedMinsByTier.entries()) {
-        if (wmins > maxWMins) {
-          maxWMins = wmins;
-          primaryTier = Number(key.replace("tier-", ""));
-        }
+    // Derive primary tier from weighted minutes, but senior starts override youth.
+    // Track senior starts separately — if a player has 5+ senior starts they are
+    // a senior player regardless of how many youth minutes are in the DB.
+    let seniorStartsTotal = 0;
+    let seniorMinsTotal = 0;
+    let bestSeniorTierByMins = 99;
+    let bestSeniorWMins = 0;
+    let bestOverallTier = 99;
+    let bestOverallWMins = 0;
+
+    for (const row of playerRows) {
+      const teamId = row.ksi_team_id ? String(row.ksi_team_id) : null;
+      const ctx = teamId ? clubCtxBySeasonTeam.get(`${seasonYearCtx}-${teamId}`) ?? null : null;
+      const tier = ctx?.competition_tier ?? null;
+      const t = Number.isFinite(Number(tier)) ? Number(tier) : 99;
+      const category = ctx?.competition_category ?? null;
+      const isYouthRow = ctx === null
+        ? true
+        : category === "U-19" || category === "U-20" || category === "U-21" || category === "U-17" || t > 5;
+      const wmins = Number(row.minutes ?? 0) * (isYouthRow ? 0.35 : 1.0);
+      if (!isYouthRow) {
+        seniorStartsTotal += Number(row.starts ?? 0);
+        seniorMinsTotal += Number(row.minutes ?? 0);
+        if (wmins > bestSeniorWMins) { bestSeniorWMins = wmins; bestSeniorTierByMins = t; }
       }
+      if (wmins > bestOverallWMins) { bestOverallWMins = wmins; bestOverallTier = t; }
+    }
+
+    // Only treat as senior player if they have substantial senior minutes (540+, i.e. 6 full games)
+    // For women, only T1/T2 counts as meaningfully senior — T3+ is amateur/youth equivalent
+    const seniorTierThreshold = isWomen ? 3 : 99;
+    if (seniorMinsTotal >= 540 && bestSeniorTierByMins < seniorTierThreshold) {
+      primaryTier = bestSeniorTierByMins;
+    } else if (weightedMinsByTier.size > 0) {
+      primaryTier = bestOverallTier;
     }
 
     // Use tier-based maxGames — league size from partial match data is unreliable
@@ -688,15 +812,20 @@ export async function GET(req: Request) {
     // Tier 4 (3. deild): 10 teams = 18 games
     // Tier 5 (4. deild): 8 teams = 14 games
     // U19 (Íslandsmót 2. flokkur karla): 3 rounds of 9 games = 27 max
-    function maxGamesForTier(tier: number, isYouthComp: boolean): number {
+    function maxGamesForTier(tier: number, isYouthComp: boolean, women: boolean): number {
       if (isYouthComp) return 27; // U19: 3 rounds × 9 games
+      if (women) {
+        if (tier <= 2) return 18; // Besta/Lengjudeild kvenna: 10 teams = 18 games
+        if (tier === 3) return 11; // 2. deild kvenna
+        return 10;
+      }
       if (tier <= 3) return 22;   // Tiers 1-3: 12 teams
       if (tier === 4) return 18;  // 3. deild: 10 teams
       if (tier === 5) return 14;  // 4. deild: 8 teams
       return 22;                  // safe fallback
     }
     const isPrimaryYouth = primaryTier >= 6;
-    const maxGames = primaryTier < 99 ? maxGamesForTier(primaryTier, isPrimaryYouth) : 22;
+    const maxGames = primaryTier < 99 ? maxGamesForTier(primaryTier, isPrimaryYouth, isWomen) : (isWomen ? 18 : 22);
 
     const rawImportance = calcImportance({
       minutes: totalMins,
@@ -712,6 +841,8 @@ export async function GET(req: Request) {
     // Position within tier bridges up to 50% toward the tier above/below.
     function tierBaseCeiling(tier: number, isYouth: boolean): number {
       if (isYouth) return 25;
+      // Women's T3+ is amateur quality — treat same as youth ceiling
+      if (isWomen && tier >= 3) return 25;
       if (tier <= 1) return 92;  // 93-100 reserved for exceptional (goals+full season)
       if (tier === 2) return 78;
       if (tier === 3) return 64;
@@ -720,7 +851,7 @@ export async function GET(req: Request) {
       return 25;
     }
 
-    let importanceCeiling = 100;
+    let importanceCeiling = 64; // sensible default if no tier data (assume mid-tier player)
     if (primaryTier < 99) {
       const baseCeiling = tierBaseCeiling(primaryTier, isPrimaryYouth);
       const tierAboveCeiling = tierBaseCeiling(primaryTier - 1, false);
@@ -797,20 +928,7 @@ export async function GET(req: Request) {
       importance = prevResult.importance;
       importanceCeiling = prevResult.ceiling;
     }
-    if (String(p.ksi_player_id) === "55994") {
 
-
-      // Manually trace the importance calc
-      for (const row of playerRows) {
-        const tid = row.ksi_team_id ? String(row.ksi_team_id) : null;
-        const ctx2 = tid ? clubCtxBySeasonTeam.get(`${seasonYear}-${tid}`) ?? null : null;
-        const tier2 = ctx2?.competition_tier ?? null;
-        const t2 = Number.isFinite(Number(tier2)) ? Number(tier2) : 99;
-        const cat2 = ctx2?.competition_category ?? null;
-        const isYouth2 = ctx2 === null ? true : cat2 === "U-19" || cat2 === "U-20" || cat2 === "U-21" || cat2 === "U-17" || t2 > 5;
-        const discount2 = isYouth2 ? 0.35 : 1.0;
-      }
-    }
 
     // All prev season clubs for this player
     const prevSeasons = prevPlayerRows
@@ -888,39 +1006,64 @@ export async function GET(req: Request) {
     const missingIds = likely.map((p) => String(p.ksi_player_id)).filter((id) => !starterIds.has(id));
     if (missingIds.length === 0) return { missing: [], missingImpact: 0 };
 
-    const { data: missRows, error: missErr } = await supabaseAdmin
-      .from("player_season_to_date")
-      .select("ksi_player_id, player_name, starts, minutes, goals, yellows, reds, ksi_team_id")
-      .eq("season_year", seasonYear)
-      .eq("ksi_team_id", teamId)
-      .in("ksi_player_id", missingIds);
+    // Fetch current season stats + birth years in parallel (both keyed on missingIds)
+    const [
+      { data: missRows, error: missErr },
+      { data: missingBirthRows },
+    ] = await Promise.all([
+      supabaseAdmin
+        .from("player_season_to_date")
+        .select("ksi_player_id, player_name, starts, minutes, goals, yellows, reds, ksi_team_id")
+        .eq("season_year", seasonYear)
+        .in("ksi_player_id", missingIds),
+      supabaseAdmin
+        .from("players")
+        .select("ksi_player_id, birth_year")
+        .in("ksi_player_id", missingIds),
+    ]);
 
     if (missErr) throw new Error(missErr.message);
 
-    const missingPlayerIds = (missRows ?? []).map((r: any) => String(r.ksi_player_id));
+    // Fetch prev season rows for players with no current data
+    const hasCurrData = new Set((missRows ?? []).map((r: any) => String(r.ksi_player_id)));
+    const needsPrevIds = missingIds.filter((id) => !hasCurrData.has(id));
 
-    const { data: missingBirthRows } = await supabaseAdmin
-      .from("players")
-      .select("ksi_player_id, birth_year")
-      .in("ksi_player_id", missingPlayerIds);
+    const { data: missPrevRows, error: missPrevErr } = needsPrevIds.length > 0
+      ? await supabaseAdmin
+          .from("player_season_to_date")
+          .select("ksi_player_id, player_name, starts, minutes, goals, yellows, reds, ksi_team_id")
+          .eq("season_year", prevSeasonYear)
+          .eq("ksi_team_id", teamId)
+          .in("ksi_player_id", needsPrevIds)
+      : { data: [], error: null };
+
+    if (missPrevErr) throw new Error(missPrevErr.message);
+
+    const allMissRows = [...(missRows ?? []), ...(missPrevRows ?? [])];
 
     const missingBirthById = new Map<string, number | null>();
     for (const r of missingBirthRows ?? []) {
       missingBirthById.set(String(r.ksi_player_id), r.birth_year ?? null);
     }
 
-    // Group missing player rows by player id for weighted importance
-    const missingRowsByPlayer = new Map<string, any[]>();
+    // Group by player — prefer current season rows, fall back to prev
+    const missingRowsByPlayer = new Map<string, { rows: any[]; seasonCtx: number }>();
     for (const r of missRows ?? []) {
       const pid = String(r.ksi_player_id);
-      const arr = missingRowsByPlayer.get(pid) ?? [];
-      arr.push(r);
-      missingRowsByPlayer.set(pid, arr);
+      const entry = missingRowsByPlayer.get(pid) ?? { rows: [], seasonCtx: seasonYear };
+      entry.rows.push(r);
+      missingRowsByPlayer.set(pid, entry);
+    }
+    for (const r of missPrevRows ?? []) {
+      const pid = String(r.ksi_player_id);
+      if (!missingRowsByPlayer.has(pid)) {
+        missingRowsByPlayer.set(pid, { rows: [r], seasonCtx: prevSeasonYear });
+      }
     }
 
-    const missing = Array.from(missingRowsByPlayer.entries()).map(([pid, rows]) => {
+    const missing = Array.from(missingRowsByPlayer.entries()).map(([pid, { rows, seasonCtx }]) => {
       const best = rows.reduce((a, b) => Number(a.minutes ?? 0) >= Number(b.minutes ?? 0) ? a : b);
-      const { importance } = calcWeightedImportance(rows, seasonYear);
+      const { importance, ceiling: importanceCeiling } = calcWeightedImportance(rows, seasonCtx);
 
       return {
         ksi_player_id: pid,
@@ -930,6 +1073,8 @@ export async function GET(req: Request) {
         minutes: rows.reduce((s: number, r: any) => s + Number(r.minutes ?? 0), 0),
         goals: rows.reduce((s: number, r: any) => s + Number(r.goals ?? 0), 0),
         importance,
+        importanceCeiling,
+        fromPrevSeason: seasonCtx === prevSeasonYear,
       };
     });
 
@@ -941,8 +1086,8 @@ export async function GET(req: Request) {
 
   const [homeMissing, awayMissing] = await Promise.all([buildMissingLikelyXI("home"), buildMissingLikelyXI("away")]);
 
-  const homeRating = sideRating(home, homeStrength);
-  const awayRating = sideRating(away, awayStrength);
+  const homeRating = sideRating(home, homeStrength, homeMissing.missingImpact);
+  const awayRating = sideRating(away, awayStrength, awayMissing.missingImpact);
 
   const homeOverall = computeOverall({
     teamStrength: homeRating.effectiveStrength,
@@ -950,6 +1095,7 @@ export async function GET(req: Request) {
     total: homeRating.total,
     coverage: homeRating.coverage,
     missingImpact: homeMissing.missingImpact,
+    women: isWomen,
   });
 
   const awayOverall = computeOverall({
@@ -958,9 +1104,21 @@ export async function GET(req: Request) {
     total: awayRating.total,
     coverage: awayRating.coverage,
     missingImpact: awayMissing.missingImpact,
+    women: isWomen,
   });
 
-  const pricing = computeOdds({ homeOverall, awayOverall, homeTier, awayTier });
+  const pricing = computeOdds({
+    homeOverall,
+    awayOverall,
+    homeTier,
+    awayTier,
+    homeRawStrength: homeRating.effectiveStrength,
+    awayRawStrength: awayRating.effectiveStrength,
+    homeLineupTotal: homeRating.total,
+    awayLineupTotal: awayRating.total,
+    homeMissingImpact: homeMissing.missingImpact,
+    awayMissingImpact: awayMissing.missingImpact,
+  });
 
   return NextResponse.json({
     inputUrl,

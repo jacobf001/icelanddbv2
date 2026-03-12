@@ -108,6 +108,9 @@ export default function HomePage() {
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<any | null>(null);
 
+  // Market odds state — persists across re-analyses until user clears
+
+
   async function runLineupAnalysis() {
     setAnalysisLoading(true);
     setAnalysisError(null);
@@ -266,7 +269,10 @@ export default function HomePage() {
             </div>
 
             {/* Model / Prediction */}
-            <ModelCard analysis={analysis} />
+            <ModelCard
+              analysis={analysis}
+
+            />
 
             {/* Missing XI */}
             {((analysis.home?.missingLikelyXI?.length ?? 0) > 0 || (analysis.away?.missingLikelyXI?.length ?? 0) > 0) && (
@@ -401,10 +407,11 @@ export default function HomePage() {
   );
 }
 
+// ---------- VALUE HELPERS ----------
+
+// Convert decimal odds to implied probability (no margin removal)
 // ---------- MODEL CARD ----------
 function ModelCard({ analysis }: { analysis: any }) {
-  const home = analysis.overall?.home ?? 0;
-  const away = analysis.overall?.away ?? 0;
   const p = analysis.probabilities;
   const odds = analysis.odds;
 
@@ -412,10 +419,6 @@ function ModelCard({ analysis }: { analysis: any }) {
   const awayStrength = analysis.teamStrength?.away ?? 0;
   const homeName = analysis.teams?.home?.team_name ?? "Home";
   const awayName = analysis.teams?.away?.team_name ?? "Away";
-
-  const predicted = p
-    ? [["H", p.home], ["D", p.draw], ["A", p.away]].sort((a, b) => (b[1] as number) - (a[1] as number))[0][0]
-    : "?";
 
   return (
     <div className="rounded-2xl border border-white/8 bg-white/3 p-6">
@@ -440,11 +443,9 @@ function ModelCard({ analysis }: { analysis: any }) {
         </div>
       )}
 
-
-
-      {/* Odds */}
+      {/* Fair odds row */}
       {odds && (
-        <div className="flex items-center gap-4 pt-4 border-t border-white/5">
+        <div className="flex items-center gap-4 pb-4 border-b border-white/5">
           <span className="text-xs text-white/30 font-mono uppercase tracking-wider">Fair odds</span>
           <div className="flex gap-4 text-sm font-mono">
             <span><span className="text-white/40">H</span> <span className="text-blue-300">{odds.home?.toFixed(2)}</span></span>
@@ -457,6 +458,7 @@ function ModelCard({ analysis }: { analysis: any }) {
           </div>
         </div>
       )}
+
     </div>
   );
 }
@@ -468,28 +470,61 @@ function MissingLikelyXI({
   accent,
 }: {
   title: string;
-  items: Array<{ ksi_player_id: string; player_name: string | null; importance: number; birth_year?: number | null }>;
+  items: Array<{ ksi_player_id: string; player_name: string | null; importance: number; importanceCeiling?: number; birth_year?: number | null }>;
   accent: "blue" | "orange";
 }) {
   if (!items || items.length === 0) return null;
 
-  const accentColor = accent === "blue" ? "text-blue-400" : "text-orange-400";
+  // Colour based on ratio of importance to ceiling — reflects quality within their tier
+  function impactColor(imp: number, ceiling: number): string {
+    const ratio = ceiling > 0 ? imp / ceiling : 0;
+    if (ratio >= 0.90) return "text-emerald-400";  // key player — near their ceiling
+    if (ratio >= 0.75) return "text-green-400";    // regular starter
+    if (ratio >= 0.55) return "text-yellow-400";   // rotation
+    return "text-white/35";                        // fringe
+  }
+
+  function impactLabel(imp: number, ceiling: number): string {
+    const ratio = ceiling > 0 ? imp / ceiling : 0;
+    if (ratio >= 0.90) return "Key";
+    if (ratio >= 0.75) return "Regular";
+    if (ratio >= 0.55) return "Squad";
+    return "";
+  }
+
+  const accentBorder = accent === "blue" ? "border-blue-500/30" : "border-orange-500/30";
+  const accentHeader = accent === "blue" ? "text-blue-400" : "text-orange-400";
 
   return (
-    <div className="rounded-2xl border border-white/8 bg-white/3 p-5">
-      <h3 className="text-sm font-semibold">{title}</h3>
+    <div className={clsx("rounded-2xl border bg-white/3 p-5", accentBorder)}>
+      <h3 className={clsx("text-sm font-semibold", accentHeader)}>{title}</h3>
       <p className="mt-1 text-xs text-white/40">Expected starters not in today's lineup.</p>
 
       <div className="mt-3 space-y-1">
-        {items.slice(0, 8).map((p) => (
-          <div key={p.ksi_player_id} className="flex items-center justify-between py-1.5 px-2 rounded-lg hover:bg-white/3 transition-colors">
-            <div>
-              <span className="text-sm text-white/85">{p.player_name ?? `Player ${p.ksi_player_id}`}</span>
-              {p.birth_year && <span className="ml-2 text-xs text-white/30 font-mono">{p.birth_year}</span>}
+        {items.slice(0, 8).map((p) => {
+          const ceiling = p.importanceCeiling ?? 100;
+          const color = impactColor(p.importance, ceiling);
+          const label = impactLabel(p.importance, ceiling);
+          return (
+            <div key={p.ksi_player_id} className="flex items-center justify-between py-1.5 px-2 rounded-lg hover:bg-white/3 transition-colors">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-sm text-white/85 truncate">{p.player_name ?? `Player ${p.ksi_player_id}`}</span>
+                {p.birth_year && <span className="text-xs text-white/30 font-mono shrink-0">{p.birth_year}</span>}
+              </div>
+              <div className="flex items-center gap-2 shrink-0 ml-3">
+                {label && (
+                  <span className={clsx("text-xs font-mono opacity-60", color)}>
+                    {label}
+                  </span>
+                )}
+                <span className={clsx("text-sm font-bold font-mono text-right", color)}>
+                  {p.importance}
+                  <span className="text-white/25 font-normal">/{ceiling}</span>
+                </span>
+              </div>
             </div>
-            <span className={clsx("text-sm font-bold font-mono", accentColor)}>{p.importance}</span>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
@@ -555,11 +590,10 @@ function PlayerAnalysisTable({ title, rows, accent }: { title: string; rows: any
                 const isOpen = expanded.has(p.ksi_player_id);
                 const imp = p.importance ?? 0;
                 const ceiling = p.importanceCeiling ?? 100;
-                // Colour relative to tier ceiling — 80%+ of ceiling = green, 55-79% = yellow, else dim
                 const impRatio = ceiling > 0 ? imp / ceiling : 0;
                 const impColor = impRatio >= 0.75 ? "text-emerald-400" : impRatio >= 0.55 ? "text-yellow-400" : imp >= 15 ? "text-white/70" : "text-white/30";
                 const rowHighlight = impRatio >= 0.75
-                  ? `border-l-2 ${accentBorder === "border-l-blue-500" ? "border-l-emerald-500" : "border-l-emerald-500"} bg-emerald-950/20`
+                  ? `border-l-2 border-l-emerald-500 bg-emerald-950/20`
                   : impRatio >= 0.55
                   ? `border-l-2 border-l-yellow-500/50 bg-yellow-950/10`
                   : "";
@@ -607,20 +641,17 @@ function PlayerAnalysisTable({ title, rows, accent }: { title: string; rows: any
                       <tr className="border-t border-white/5 bg-black/20">
                         <td />
                         <td colSpan={6} className="px-3 py-3 text-xs text-white/50 space-y-1">
-                          {/* Mobile stats */}
                           <div className="flex gap-4 sm:hidden mb-2 text-white/60">
                             <span>Min: {p.season?.minutes ?? "—"}</span>
                             <span>GS: {p.season?.starts ?? "—"}</span>
                             <span>G: {p.season?.goals ?? "—"}</span>
                           </div>
-                          {/* Last 5 form detail */}
                           {p.recent5 && (
                             <div className="mb-1 flex items-center gap-2">
                               <span className="text-white/30">Last 5:</span>
                               <span>{p.recent5.lastNMinutes}m in {p.recent5.lastNApps} apps ({p.recent5.lastNStarts} starts)</span>
                             </div>
                           )}
-                          {/* Current season clubs */}
                           {p.seasons?.length > 0
                             ? p.seasons.map((s: any, i: number) => (
                                 <div key={i} className="flex gap-1">
@@ -630,7 +661,6 @@ function PlayerAnalysisTable({ title, rows, accent }: { title: string; rows: any
                               ))
                             : <div className="flex gap-1"><span className="text-white/30 w-8">2025</span><span>—</span></div>
                           }
-                          {/* Prev season clubs */}
                           {p.prevSeasons?.length > 0
                             ? p.prevSeasons.map((ps: any, i: number) => (
                                 <div key={i} className="flex gap-1">
@@ -662,9 +692,7 @@ function FormDots({ recent5 }: { recent5?: { lastNApps: number; lastNMinutes: nu
   }
 
   const mins = recent5.lastNMinutes;
-
-  // Show minutes as a compact bar
-  const pct = Math.min(100, Math.round((mins / 450) * 100)); // 450 = 5 full games
+  const pct = Math.min(100, Math.round((mins / 450) * 100));
   const color = pct >= 70 ? "bg-emerald-500" : pct >= 40 ? "bg-yellow-500" : "bg-white/20";
 
   return (
