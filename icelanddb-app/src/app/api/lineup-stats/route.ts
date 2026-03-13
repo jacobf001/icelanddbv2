@@ -746,7 +746,8 @@ export async function GET(req: Request) {
       const isYouth = ctx === null
         ? true  // no DB entry = untracked competition = treat as youth
         : category === "U-19" || category === "U-20" ||
-          category === "U-21" || category === "U-17" || t > 5;
+          category === "U-21" || category === "U-17" ||
+          (t > 5 && category !== "Fullorðnir" && category !== "Adults");
       const youthDiscount = isYouth ? 0.35 : 1.0;
       totalMins += Number(row.minutes ?? 0) * youthDiscount;
       totalStarts += Number(row.starts ?? 0) * youthDiscount;
@@ -784,7 +785,8 @@ export async function GET(req: Request) {
       const category = ctx?.competition_category ?? null;
       const isYouthRow = ctx === null
         ? true
-        : category === "U-19" || category === "U-20" || category === "U-21" || category === "U-17" || t > 5;
+        : category === "U-19" || category === "U-20" || category === "U-21" || category === "U-17" ||
+          (t > 5 && category !== "Fullorðnir" && category !== "Adults");
       const wmins = Number(row.minutes ?? 0) * (isYouthRow ? 0.35 : 1.0);
       if (!isYouthRow) {
         seniorStartsTotal += Number(row.starts ?? 0);
@@ -824,7 +826,24 @@ export async function GET(req: Request) {
       if (tier === 5) return 14;  // 4. deild: 8 teams
       return 22;                  // safe fallback
     }
-    const isPrimaryYouth = primaryTier >= 6;
+    // isPrimaryYouth: only true for actual youth competitions (category-based), not T6 adult
+    // We check if the primary tier rows are youth competitions by category
+    const primaryTierRows = playerRows.filter((r: any) => {
+      const teamId = r.ksi_team_id ? String(r.ksi_team_id) : null;
+      const ctx = teamId ? clubCtxBySeasonTeam.get(`${seasonYearCtx}-${teamId}`) ?? null : null;
+      const t = Number.isFinite(Number(ctx?.competition_tier)) ? Number(ctx?.competition_tier) : 99;
+      return t === primaryTier;
+    });
+    const primaryCategory = primaryTierRows[0]
+      ? (() => {
+          const teamId = primaryTierRows[0].ksi_team_id ? String(primaryTierRows[0].ksi_team_id) : null;
+          const ctx = teamId ? clubCtxBySeasonTeam.get(`${seasonYearCtx}-${teamId}`) ?? null : null;
+          return ctx?.competition_category ?? null;
+        })()
+      : null;
+    const isPrimaryYouth = primaryCategory === "U-19" || primaryCategory === "U-20" ||
+      primaryCategory === "U-21" || primaryCategory === "U-17" ||
+      (primaryTier >= 6 && primaryCategory !== "Fullorðnir" && primaryCategory !== "Adults");
     const maxGames = primaryTier < 99 ? maxGamesForTier(primaryTier, isPrimaryYouth, isWomen) : (isWomen ? 18 : 22);
 
     const rawImportance = calcImportance({
@@ -840,15 +859,15 @@ export async function GET(req: Request) {
     // Base ceilings per tier — big gaps to reflect quality difference.
     // Position within tier bridges up to 50% toward the tier above/below.
     function tierBaseCeiling(tier: number, isYouth: boolean): number {
-      if (isYouth) return 25;
+      if (isYouth) return 22;
       // Women's T3+ is amateur quality — treat same as youth ceiling
-      if (isWomen && tier >= 3) return 25;
+      if (isWomen && tier >= 3) return 22;
       if (tier <= 1) return 92;  // 93-100 reserved for exceptional (goals+full season)
       if (tier === 2) return 78;
       if (tier === 3) return 64;
       if (tier === 4) return 50;
       if (tier === 5) return 36;
-      return 25;
+      return 28;  // T6 adult — above youth but below T5
     }
 
     let importanceCeiling = 64; // sensible default if no tier data (assume mid-tier player)
@@ -879,7 +898,7 @@ export async function GET(req: Request) {
         const positionFactor = (size - pos) / (size - 1);
         const adjustment = positionFactor >= 0.5
           ? (tierAboveCeiling - baseCeiling) * (positionFactor - 0.5)  // top half: bridge toward tier above
-          : (tierBelowCeiling - baseCeiling) * (0.5 - positionFactor); // bottom half: bridge toward tier below
+          : 0; // bottom half: no downward bridging — tier ceiling is a floor, not a range
         importanceCeiling = Math.round(baseCeiling + adjustment);
       } else {
         importanceCeiling = baseCeiling;

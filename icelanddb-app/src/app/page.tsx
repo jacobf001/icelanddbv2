@@ -470,7 +470,7 @@ function MissingLikelyXI({
   accent,
 }: {
   title: string;
-  items: Array<{ ksi_player_id: string; player_name: string | null; importance: number; importanceCeiling?: number; birth_year?: number | null }>;
+  items: Array<{ ksi_player_id: string; player_name: string | null; importance: number; importanceCeiling?: number; birth_year?: number | null; goals?: number }>;
   accent: "blue" | "orange";
 }) {
   if (!items || items.length === 0) return null;
@@ -510,6 +510,9 @@ function MissingLikelyXI({
               <div className="flex items-center gap-2 min-w-0">
                 <span className="text-sm text-white/85 truncate">{p.player_name ?? `Player ${p.ksi_player_id}`}</span>
                 {p.birth_year && <span className="text-xs text-white/30 font-mono shrink-0">{p.birth_year}</span>}
+                {p.goals != null && p.goals > 0 && (
+                  <span className="text-xs font-mono text-emerald-400/80 shrink-0">⚽ {p.goals}</span>
+                )}
               </div>
               <div className="flex items-center gap-2 shrink-0 ml-3">
                 {label && (
