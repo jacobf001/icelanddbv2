@@ -178,7 +178,12 @@ function sideRating(side: { starters: any[]; bench: any[] }, sideStrength: numbe
   // history becomes increasingly unreliable as a predictor of today's performance.
   const historyCap = clamp01(1 - missingRatio * 1.5);
   const cappedHistStrength = histStrength * historyCap;
-  const effectiveStrength = clamp01(cappedHistStrength * histWeight + avgStarterImp * lineupWeight);
+  const rawEffective = clamp01(cappedHistStrength * histWeight + avgStarterImp * lineupWeight);
+  // Floor: scales with actual lineup quality — a team with zero-importance starters
+  // gets no floor protection. Full floor only applies when starters are decent.
+  // avgStarterImp near 0 → floor near 0; avgStarterImp near histStrength → floor = 40% hist.
+  const tierFloor = histStrength * 0.40 * Math.min(1, avgStarterImp / Math.max(histStrength, 0.01));
+  const effectiveStrength = Math.max(rawEffective, tierFloor);
 
   const raw = starterSum + benchSum * 0.35;
   const scaled = raw * (0.85 + 0.30 * effectiveStrength);
@@ -266,18 +271,16 @@ function computeOdds(params: {
   const awayBaseline = lineupBaselineForTier(awayTier);
   // Wider clamp range: allow a truly devastated lineup (-1.0) to make a real difference
   // Subtract missing impact from effective lineup total — missing players hurt lineup quality
-  const homeEffectiveTotal = Math.max(0, params.homeLineupTotal - params.homeMissingImpact * 0.8);
-  const awayEffectiveTotal = Math.max(0, params.awayLineupTotal - params.awayMissingImpact * 0.8);
-  const homeLineupMod = clamp((homeEffectiveTotal - homeBaseline) / homeBaseline, -1.0, 0.3);
-  const awayLineupMod = clamp((awayEffectiveTotal - awayBaseline) / awayBaseline, -1.0, 0.3);
-  const lineupZ = (homeLineupMod - awayLineupMod) * 2.0;
+  // lineupZ removed — effectiveStrength already captures lineup quality and missing impact.
+  // Adding a separate lineupZ double-penalises teams with missing players.
+  const lineupZ = 0;
 
   // Tier cross-match adjustment (lower tier team away gets slight penalty)
   // But reduce this if the away team's lineup is significantly below their tier baseline —
   // a T1 team fielding a youth squad shouldn't get a tier bonus over a full-strength T2 side.
   // Tier advantage is structural — a T3 team playing T4 retains that quality gap
   // even when missing players. Don't dampen by lineup ratio.
-  const tierAdv = clamp((awayTier - homeTier) * 0.50, -2.0, 2.0);
+  const tierAdv = clamp((awayTier - homeTier) * 1.50, -2.0, 2.0);
 
   // Home advantage scales strongly with tier — at T1 it's meaningful (crowd, travel),
   // at T4/T5 amateur level teams often share pitches and there's no real home advantage.
@@ -946,6 +949,32 @@ export async function GET(req: Request) {
     } else if (prevResult !== null) {
       importance = prevResult.importance;
       importanceCeiling = prevResult.ceiling;
+    }
+
+    // If a player is playing for a lower-tier team than their primary club,
+    // cap their importance ceiling to the match team's tier ceiling.
+    // e.g. a T1 fringe player starting for a T3 team should be rated as T3.
+    const sideCtx = sideTeamId ? clubCtxBySeasonTeam.get(`${seasonYear}-${sideTeamId}`) ?? null : null;
+    const sideTierRaw = Number(sideCtx?.competition_tier ?? 99);
+    const sideTier = Number.isFinite(sideTierRaw) ? sideTierRaw : 99;
+    if (sideTier < 99) {
+      const sideCeiling = isWomen
+        ? (sideTier <= 1 ? 92 : sideTier <= 2 ? 78 : 22)
+        : (sideTier <= 1 ? 92 : sideTier === 2 ? 78 : sideTier === 3 ? 64 : sideTier === 4 ? 50 : sideTier === 5 ? 36 : 28);
+      if (sideCeiling < importanceCeiling) {
+        importanceCeiling = sideCeiling;
+        // Player has no stats for the side team and their primary club is higher tier —
+        // they're playing down (loan/dual reg). Use a default of 35% of side ceiling
+        // rather than near-zero from sparse higher-tier minutes.
+        const hasTeamStats = sideTeamId
+          ? (playerRows ?? []).some((r: any) => String(r.ksi_team_id) === sideTeamId && Number(r.minutes ?? 0) > 0)
+          : false;
+        if (!hasTeamStats && importance < Math.round(sideCeiling * 0.35)) {
+          importance = Math.round(sideCeiling * 0.35);
+        } else {
+          importance = Math.min(importance, sideCeiling);
+        }
+      }
     }
 
 
