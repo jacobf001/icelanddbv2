@@ -443,7 +443,7 @@ function ModelCard({ analysis }: { analysis: any }) {
         </div>
       )}
 
-      {/* Fair odds row */}
+      {/* Fair odds */}
       {odds && (
         <div className="flex items-center gap-4 pb-4 border-b border-white/5">
           <span className="text-xs text-white/30 font-mono uppercase tracking-wider">Fair odds</span>
@@ -452,13 +452,53 @@ function ModelCard({ analysis }: { analysis: any }) {
             <span><span className="text-white/40">D</span> <span className="text-white/60">{odds.draw?.toFixed(2)}</span></span>
             <span><span className="text-white/40">A</span> <span className="text-orange-300">{odds.away?.toFixed(2)}</span></span>
           </div>
-          <div className="ml-auto">
-            <span className="text-xs font-mono text-white/30">Str: </span>
-            <span className="text-xs font-mono text-white/50">{Math.round(homeStrength * 100)} vs {Math.round(awayStrength * 100)}</span>
-          </div>
         </div>
       )}
 
+      {/* Team strength comparison */}
+      <div className="mt-4 grid grid-cols-2 gap-3">
+        {([
+          { name: homeName, strength: homeStrength, tier: analysis.teamStrengthDebug?.home?.competition_tier, color: "blue" as const },
+          { name: awayName, strength: awayStrength, tier: analysis.teamStrengthDebug?.away?.competition_tier, color: "orange" as const },
+        ]).map(({ name, strength, tier, color }) => {
+          const str = Math.round(strength * 100);
+          const isBlue = color === "blue";
+
+          const tierLabel = tier != null ? `T${tier}` : "—";
+          const tierColor =
+            tier == null  ? "text-white/20 bg-white/5 border-white/5" :
+            tier <= 1     ? "text-emerald-300 bg-emerald-950/60 border-emerald-500/20" :
+            tier === 2    ? "text-green-300 bg-green-950/60 border-green-500/20" :
+            tier === 3    ? "text-yellow-300 bg-yellow-950/60 border-yellow-500/20" :
+            tier === 4    ? "text-orange-300 bg-orange-950/60 border-orange-500/20" :
+                            "text-red-300 bg-red-950/60 border-red-500/20";
+
+          const barColor = isBlue ? "bg-blue-500" : "bg-orange-500";
+          const barW = Math.max(2, str);
+
+          return (
+            <div key={name} className="rounded-lg bg-white/3 border border-white/5 px-3 py-2.5">
+              <div className="flex items-center justify-between mb-2">
+                <span className={`text-xs font-mono font-semibold px-1.5 py-0.5 rounded border ${tierColor}`}>
+                  {tierLabel}
+                </span>
+                <span className="text-xs font-mono text-white/50">
+                  {str}<span className="text-white/20">/100</span>
+                </span>
+              </div>
+              <div className="h-1.5 rounded-full bg-white/8 overflow-hidden mb-2">
+                <div
+                  className={`h-full rounded-full ${barColor} transition-all duration-500`}
+                  style={{ width: `${barW}%` }}
+                />
+              </div>
+              <div className={`text-xs font-medium truncate ${isBlue ? "text-blue-300/80" : "text-orange-300/80"}`}>
+                {name}
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

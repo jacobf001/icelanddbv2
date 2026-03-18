@@ -82,9 +82,6 @@ function clamp(x: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, x));
 }
 
-// Tier weight used only for team strength calculations, NOT player importance.
-// Player importance is purely about minutes/starts/goals within their own team context.
-// Whether that team is good or bad is handled by teamStrength separately.
 function tierWeightForStrength(tier: number | null): number {
   const t = Number.isFinite(Number(tier)) ? Number(tier) : 6;
   if (t <= 1) return 1.0;
@@ -99,7 +96,6 @@ function isWomensCompetition(name: string | null | undefined): boolean {
   return !!name && /kvenna/i.test(name);
 }
 
-// Women's pyramid is much steeper — T1 near-professional, T2+ semi-amateur
 function tierScale(tier: number, women = false) {
   const t = Number.isFinite(tier) ? tier : 99;
   if (t <= 1) return 1.0;
@@ -133,55 +129,51 @@ function tierQualityN(tier: number | null | undefined, women = false) {
 }
 
 function calcImportance(params: {
-  minutes: number;   // already tier-weighted
+  minutes: number;
   starts: number;
   goals: number;
   yellows: number;
   reds: number;
-  maxGames: number;  // full season game count for the player's primary league
+  maxGames: number;
+  // FIX 2: pass ceiling so raw score is scaled tier-relatively from the start.
+  // This prevents every regular starter from hitting ceiling/ceiling regardless of tier.
+  // A full-season T5 starter scores ~35/36, a partial-season one scores ~20/36.
+  importanceCeiling: number;
 }) {
   const maxMins = params.maxGames * 90;
   const minutesN = clamp01(params.minutes / maxMins);
   const startsN = clamp01(params.starts / params.maxGames);
 
-  // Minutes + starts are the dominant signals, unchanged.
-  // Goals added on top — not replacing other weight, so prolific scorers get
-  // a genuine boost without penalising non-scoring regulars.
-  // 8 goals → +0.10 boost, 12+ goals → full +0.15
   const goalsBoost = clamp01(params.goals / 12) * 0.15;
   const cardPenalty = clamp01(params.yellows * 0.02 + params.reds * 0.08);
 
   const base = minutesN * 0.35 + startsN * 0.55 + goalsBoost - cardPenalty;
 
-  return Math.max(0, Math.round(base * 100));
+  // Scale by (ceiling / 92) so the natural range for each tier fills its ceiling.
+  // 92 is the T1 ceiling — the "full" benchmark.
+  // A T5 full-season regular: base≈0.90 → 90 * (36/92) ≈ 35, not 90 hard-capped to 36.
+  // A T5 half-season player: base≈0.50 → 50 * (36/92) ≈ 20, properly differentiated.
+  const tierScale = clamp01(params.importanceCeiling / 92);
+  const raw = Math.max(0, Math.round(base * 100 * tierScale));
+
+  return raw;
 }
 
 function sideRating(side: { starters: any[]; bench: any[] }, sideStrength: number, missingImpact = 0) {
   const starterSum = side.starters.reduce((s, p) => s + Number(p.importance ?? 0), 0);
   const benchSum = side.bench.reduce((s, p) => s + Number(p.importance ?? 0), 0);
 
-  // avgStarterImp: penalise for missing players relative to expected squad size.
-  // missingRatio = what fraction of the full expected squad's quality is absent.
-  // This preserves the difference between teams — a team with better actual starters
-  // AND fewer missing players rates higher than one with weaker starters AND more missing.
   const presentAvg = side.starters.length > 0 ? starterSum / side.starters.length : 0;
   const expectedTotal = starterSum + missingImpact;
   const missingRatio = expectedTotal > 0 ? clamp01(missingImpact / expectedTotal) : 0;
-  // Scale present avg down by missing ratio — more missing = bigger penalty
   const avgStarterImp = clamp01((presentAvg / 100) * (1 - missingRatio));
   const histStrength = Number.isFinite(sideStrength) ? sideStrength : 0.5;
-  // If avg importance is well below historical strength, lineup is clearly weakened — weight it more
-  const lineupGap = Math.max(0, histStrength - avgStarterImp); // 0 = full strength, 1 = totally weak
-  const lineupWeight = clamp01(0.40 + lineupGap * 0.60); // 0.40 normally → up to 1.0 for very weak lineups
+  const lineupGap = Math.max(0, histStrength - avgStarterImp);
+  const lineupWeight = clamp01(0.40 + lineupGap * 0.60);
   const histWeight = 1 - lineupWeight;
-  // Further cap history contribution based on missing ratio — if 40%+ of squad is missing,
-  // history becomes increasingly unreliable as a predictor of today's performance.
   const historyCap = clamp01(1 - missingRatio * 1.5);
   const cappedHistStrength = histStrength * historyCap;
   const rawEffective = clamp01(cappedHistStrength * histWeight + avgStarterImp * lineupWeight);
-  // Floor: scales with actual lineup quality — a team with zero-importance starters
-  // gets no floor protection. Full floor only applies when starters are decent.
-  // avgStarterImp near 0 → floor near 0; avgStarterImp near histStrength → floor = 40% hist.
   const tierFloor = histStrength * 0.40 * Math.min(1, avgStarterImp / Math.max(histStrength, 0.01));
   const effectiveStrength = Math.max(rawEffective, tierFloor);
 
@@ -217,9 +209,6 @@ function computeOverall(params: {
   const tierN = clamp01(tierQualityN(params.tier, params.women));
   const lineupN = clamp01(params.total / 800);
   const coverageN = clamp01(params.coverage);
-  // Normalise missing impact relative to tier ceiling — a missing 49-rated T4 player
-  // is proportionally as damaging as a missing 78-rated T2 player.
-  // Use ~4 missing regulars at tier ceiling as the "fully depleted" baseline.
   function tierCeilingForMissing(tier: number | null, women: boolean): number {
     const t = Number.isFinite(Number(tier)) ? Number(tier) : 3;
     if (t <= 1) return 92;
@@ -233,7 +222,6 @@ function computeOverall(params: {
   const tierCeiling = tierCeilingForMissing(params.tier, params.women ?? false);
   const missingN = clamp01(params.missingImpact / (tierCeiling * 4));
 
-  // Rebalanced: tier weight reduced, lineup quality and strength boosted
   const overallN = 0.18 * tierN
                  + 0.30 * strengthN
                  + 0.42 * lineupN
@@ -252,38 +240,18 @@ function computeOdds(params: {
   const homeTier = Number.isFinite(Number(params.homeTier)) ? Number(params.homeTier) : 6;
   const awayTier = Number.isFinite(Number(params.awayTier)) ? Number(params.awayTier) : 6;
 
-  // Primary signal: effective team strength (blends historical strength with actual lineup quality)
-  // effectiveStrength already accounts for missing players via sideRating's missingRatio penalty
   const rawStrengthDiff = clamp(params.homeRawStrength - params.awayRawStrength, -1, 1);
   const strengthZ = rawStrengthDiff * 6.5;
 
-  // Secondary signal: lineup quality modifier — how does today's lineup compare to expected?
-  // Baseline is tier-relative: a full-strength T1 side scores ~726, T2 ~580, T3 ~460 etc.
-  // This prevents a T2 team's normal lineup from looking "weakened" against a T1 baseline.
-  function lineupBaselineForTier(tier: number): number {
-    if (tier <= 1) return 726;
-    if (tier === 2) return 580;
-    if (tier === 3) return 460;
-    if (tier === 4) return 360;
-    return 280;
-  }
-  const homeBaseline = lineupBaselineForTier(homeTier);
-  const awayBaseline = lineupBaselineForTier(awayTier);
-  // Wider clamp range: allow a truly devastated lineup (-1.0) to make a real difference
-  // Subtract missing impact from effective lineup total — missing players hurt lineup quality
-  // lineupZ removed — effectiveStrength already captures lineup quality and missing impact.
-  // Adding a separate lineupZ double-penalises teams with missing players.
   const lineupZ = 0;
 
-  // Tier cross-match adjustment (lower tier team away gets slight penalty)
-  // But reduce this if the away team's lineup is significantly below their tier baseline —
-  // a T1 team fielding a youth squad shouldn't get a tier bonus over a full-strength T2 side.
-  // Tier advantage is structural — a T3 team playing T4 retains that quality gap
-  // even when missing players. Don't dampen by lineup ratio.
-  const tierAdv = clamp((awayTier - homeTier) * 1.50, -2.0, 2.0);
+  // Tier adjustment: favours the structurally stronger (lower tier number) team.
+  // (awayTier - homeTier): positive when home is weaker tier → negative z → away favoured. ✓
+  // (awayTier - homeTier): negative when home is stronger tier → positive z → home favoured. ✓
+  // Multiplier reduced from 1.50 → 0.50: a 1-tier gap contributes ±0.50 to z,
+  // proportionate alongside strengthZ and homeAdv without swamping them.
+  const tierAdv = clamp((awayTier - homeTier) * 0.50, -2.0, 2.0);
 
-  // Home advantage scales strongly with tier — at T1 it's meaningful (crowd, travel),
-  // at T4/T5 amateur level teams often share pitches and there's no real home advantage.
   const avgTier = ((homeTier ?? 3) + (awayTier ?? 3)) / 2;
   const homeAdv = clamp(0.40 - (avgTier - 1) * 0.10, 0.05, 0.40);
 
@@ -431,7 +399,6 @@ export async function GET(req: Request) {
     birthYearById.set(String(r.ksi_player_id), r.birth_year ?? null);
   }
 
-  // All current season rows per player (supports multiple clubs)
   const allRowsByPlayer = new Map<string, any[]>();
   for (const r of seasonRows ?? []) {
     const id = String((r as any).ksi_player_id);
@@ -440,13 +407,11 @@ export async function GET(req: Request) {
     allRowsByPlayer.set(id, arr);
   }
 
-  // Best current row per player (most minutes, for fallback)
   const bestRowByPlayer = new Map<string, any>();
   for (const [id, rows] of allRowsByPlayer.entries()) {
     bestRowByPlayer.set(id, rows.reduce((a, b) => Number(a.minutes ?? 0) >= Number(b.minutes ?? 0) ? a : b));
   }
 
-  // All prev season rows per player
   const allPrevRowsByPlayer = new Map<string, any[]>();
   for (const r of prevSeasonRows ?? []) {
     const id = String((r as any).ksi_player_id);
@@ -455,44 +420,22 @@ export async function GET(req: Request) {
     allPrevRowsByPlayer.set(id, arr);
   }
 
-  // Best prev row per player (for fallback)
   const bestPrevRowByPlayer = new Map<string, any>();
   for (const [id, rows] of allPrevRowsByPlayer.entries()) {
     bestPrevRowByPlayer.set(id, rows.reduce((a, b) => Number(a.minutes ?? 0) >= Number(b.minutes ?? 0) ? a : b));
   }
 
-  // Team name lookup
+  // seasonTeamIds and statTeamIds are the same set — compute once
   const seasonTeamIds = Array.from(
     new Set(
       [...(seasonRows ?? []), ...(prevSeasonRows ?? [])].map((r: any) => String(r.ksi_team_id)).filter(Boolean),
     ),
   );
+  const statTeamIds = seasonTeamIds;
 
-  const teamNameById = new Map<string, string>();
-  if (seasonTeamIds.length) {
-    const { data: tnRows, error: tnErr } = await supabaseAdmin
-      .from("teams")
-      .select("ksi_team_id, name")
-      .in("ksi_team_id", seasonTeamIds);
-
-    if (tnErr) return NextResponse.json({ error: tnErr.message }, { status: 500 });
-
-    for (const t of tnRows ?? []) {
-      const id = String((t as any).ksi_team_id);
-      const nm = (t as any).name ?? null;
-      if (nm) teamNameById.set(id, String(nm));
-    }
-  }
-
-  // 3) Team strength
+  // 3) Team strength + team names in one Promise.all — eliminates a sequential round-trip
   const homeTeamId = teams.home.ksi_team_id;
   const awayTeamId = teams.away.ksi_team_id;
-
-  const statTeamIds = Array.from(
-    new Set(
-      [...(seasonRows ?? []), ...(prevSeasonRows ?? [])].map((r: any) => String(r.ksi_team_id)).filter(Boolean),
-    ),
-  );
 
   const teamIdsToLoad = Array.from(new Set([homeTeamId, awayTeamId, ...statTeamIds].filter(Boolean))) as string[];
 
@@ -500,12 +443,13 @@ export async function GET(req: Request) {
   const compNameByTeam = new Map<string, string>();
   const tierByTeam = new Map<string, number>();
   const teamStrengthDebug = new Map<string, TeamStrengthDebugRow>();
+  const teamNameById = new Map<string, string>();
 
   if (teamIdsToLoad.length) {
-    // Batch 2: cur + prev team strength in parallel
     const [
       { data: curRows, error: curErr },
       { data: prevRows, error: prevErr },
+      { data: tnRows, error: tnErr },
     ] = await Promise.all([
       supabaseAdmin
         .from("computed_league_table")
@@ -517,10 +461,21 @@ export async function GET(req: Request) {
         .select("season_year, team_ksi_id, ksi_competition_id, played, points, competition_tier, competition_name, position")
         .eq("season_year", prevSeasonYear)
         .in("team_ksi_id", teamIdsToLoad),
+      supabaseAdmin
+        .from("teams")
+        .select("ksi_team_id, name")
+        .in("ksi_team_id", teamIdsToLoad),
     ]);
 
     if (curErr) return NextResponse.json({ error: curErr.message }, { status: 500 });
     if (prevErr) return NextResponse.json({ error: prevErr.message }, { status: 500 });
+    if (tnErr) return NextResponse.json({ error: tnErr.message }, { status: 500 });
+
+    for (const t of tnRows ?? []) {
+      const id = String((t as any).ksi_team_id);
+      const nm = (t as any).name ?? null;
+      if (nm) teamNameById.set(id, String(nm));
+    }
 
     const leagueSizeByComp = new Map<string, number>();
     for (const r of curRows ?? []) {
@@ -603,10 +558,10 @@ export async function GET(req: Request) {
   const awayCompName = awayTeamId ? (compNameByTeam.get(awayTeamId) ?? null) : null;
   const isWomen = isWomensCompetition(homeCompName) || isWomensCompetition(awayCompName);
 
-  // Player club context
+  // Player club context — shared map, mutated by buildMissingLikelyXI for missing players' clubs
   const clubCtxBySeasonTeam = new Map<string, TeamSeasonContext>();
 
-  // Batch 3: club context + recent lineups in parallel (both independent at this point)
+  // Batch 3: club ctx + match lineups in parallel
   const [clubRowsResult, lineupRowsResult] = await Promise.all([
     statTeamIds.length
       ? supabaseAdmin
@@ -627,43 +582,44 @@ export async function GET(req: Request) {
   if (clubErr) return NextResponse.json({ error: clubErr.message }, { status: 500 });
   if (lineupErr) return NextResponse.json({ error: lineupErr.message }, { status: 500 });
 
-  if (statTeamIds.length) {
-
-    // Count how many teams are in each competition (= league size)
+  // Helper: populate clubCtxBySeasonTeam from a batch of computed_league_table rows
+  function ingestClubRows(rows: any[]) {
     const clubLeagueSizeByComp = new Map<string, number>();
-    for (const r of clubRows ?? []) {
+    for (const r of rows ?? []) {
       const compId = String((r as any).ksi_competition_id ?? "");
       if (!compId) continue;
       clubLeagueSizeByComp.set(compId, (clubLeagueSizeByComp.get(compId) ?? 0) + 1);
     }
 
     const grouped = new Map<string, any[]>();
-    for (const r of clubRows ?? []) {
+    for (const r of rows ?? []) {
       const k = `${r.season_year}-${r.team_ksi_id}`;
       const arr = grouped.get(k) ?? [];
       arr.push(r);
       grouped.set(k, arr);
     }
 
-    for (const [k, rows] of grouped.entries()) {
+    function tierLeagueSize(tier: number | null): number | null {
+      if (tier === null) return null;
+      if (tier <= 3) return 12;
+      if (tier === 4) return 10;
+      if (tier === 5) return 8;
+      return null;
+    }
+
+    for (const [, rows] of grouped.entries()) {
       const best = Array.from(pickBestRowPerTeam(rows).values())[0];
       if (!best) continue;
 
       const season = Number(best.season_year);
       const teamId = String(best.team_ksi_id);
-      const compId = String(best.ksi_competition_id ?? "");
-      const leagueSize = compId ? (clubLeagueSizeByComp.get(compId) ?? null) : null;
+      const key = `${season}-${teamId}`;
+
+      // Don't overwrite an existing entry — lineup players' clubs were loaded first
+      if (clubCtxBySeasonTeam.has(key)) continue;
 
       const ctxTier = Number.isFinite(Number(best.competition_tier)) ? Number(best.competition_tier) : null;
-      // Use tier-based league size — partial match data only has teams present in this match
-      function tierLeagueSize(tier: number | null): number | null {
-        if (tier === null) return null;
-        if (tier <= 3) return 12;
-        if (tier === 4) return 10;
-        if (tier === 5) return 8;
-        return null;
-      }
-      clubCtxBySeasonTeam.set(`${season}-${teamId}`, {
+      clubCtxBySeasonTeam.set(key, {
         season_year: season,
         team_ksi_id: teamId,
         competition_tier: ctxTier,
@@ -677,7 +633,11 @@ export async function GET(req: Request) {
     }
   }
 
-  // 4) Recent form (lineupRows already fetched in batch 3 above)
+  if (statTeamIds.length) {
+    ingestClubRows(clubRows ?? []);
+  }
+
+  // 4) Recent form — kickoffs fetched here (must follow lineupRows to get match IDs)
   const matchIds = Array.from(new Set((lineupRows ?? []).map((r: any) => String(r.ksi_match_id)).filter(Boolean)));
 
   const kickoffMap = new Map<string, number>();
@@ -725,10 +685,6 @@ export async function GET(req: Request) {
     yellowsOverride?: number,
     redsOverride?: number,
   ) {
-    // Importance uses RAW minutes — no tier discount.
-    // A player who starts every game for Aldershot is just as "important to their team"
-    // as one who starts every game for Man City. Tier quality is handled by teamStrength.
-    // We do still pick the player's primary (highest) league to set the maxGames ceiling.
     let totalMins = 0;
     let totalStarts = 0;
     let totalGoals = goalsOverride ?? 0;
@@ -744,10 +700,8 @@ export async function GET(req: Request) {
       const tier = ctx?.competition_tier ?? null;
       const t = Number.isFinite(Number(tier)) ? Number(tier) : 99;
       const category = ctx?.competition_category ?? null;
-      // Must check ctx explicitly — null tier coerces to 0 via Number(null)
-      // which would incorrectly pass the t <= 5 senior check.
       const isYouth = ctx === null
-        ? true  // no DB entry = untracked competition = treat as youth
+        ? true
         : category === "U-19" || category === "U-20" ||
           category === "U-21" || category === "U-17" ||
           (t > 5 && category !== "Fullorðnir" && category !== "Adults");
@@ -755,24 +709,17 @@ export async function GET(req: Request) {
       totalMins += Number(row.minutes ?? 0) * youthDiscount;
       totalStarts += Number(row.starts ?? 0) * youthDiscount;
 
-      // Youth goals excluded entirely — they don't reflect senior threat level
       if (goalsOverride === undefined && !isYouth) totalGoals += Number(row.goals ?? 0);
       if (yellowsOverride === undefined) totalYellows += Number(row.yellows ?? 0) * youthDiscount;
       if (redsOverride === undefined) totalReds += Number(row.reds ?? 0) * youthDiscount;
 
-      // Track weighted minutes per tier to determine primary tier
-      // (tier with most weighted minutes = player's true primary competition)
       const key = `tier-${t}`;
       weightedMinsByTier.set(key, (weightedMinsByTier.get(key) ?? 0) + Number(row.minutes ?? 0) * youthDiscount);
-      // Still track highest tier seen for fallback
       if (t < primaryTier) {
         primaryTier = t;
       }
     }
 
-    // Derive primary tier from weighted minutes, but senior starts override youth.
-    // Track senior starts separately — if a player has 5+ senior starts they are
-    // a senior player regardless of how many youth minutes are in the DB.
     let seniorStartsTotal = 0;
     let seniorMinsTotal = 0;
     let bestSeniorTierByMins = 99;
@@ -799,8 +746,6 @@ export async function GET(req: Request) {
       if (wmins > bestOverallWMins) { bestOverallWMins = wmins; bestOverallTier = t; }
     }
 
-    // Only treat as senior player if they have substantial senior minutes (540+, i.e. 6 full games)
-    // For women, only T1/T2 counts as meaningfully senior — T3+ is amateur/youth equivalent
     const seniorTierThreshold = isWomen ? 3 : 99;
     if (seniorMinsTotal >= 540 && bestSeniorTierByMins < seniorTierThreshold) {
       primaryTier = bestSeniorTierByMins;
@@ -808,29 +753,19 @@ export async function GET(req: Request) {
       primaryTier = bestOverallTier;
     }
 
-    // Use tier-based maxGames — league size from partial match data is unreliable
-    // since we only fetch teams present in this specific match, not the full competition.
-    // Based on actual Icelandic league structures:
-    // Tier 1 (Besta deild): 12 teams = 22 games
-    // Tier 2 (Lengjudeild): 12 teams = 22 games
-    // Tier 3 (2. deild): 12 teams = 22 games
-    // Tier 4 (3. deild): 10 teams = 18 games
-    // Tier 5 (4. deild): 8 teams = 14 games
-    // U19 (Íslandsmót 2. flokkur karla): 3 rounds of 9 games = 27 max
     function maxGamesForTier(tier: number, isYouthComp: boolean, women: boolean): number {
-      if (isYouthComp) return 27; // U19: 3 rounds × 9 games
+      if (isYouthComp) return 27;
       if (women) {
-        if (tier <= 2) return 18; // Besta/Lengjudeild kvenna: 10 teams = 18 games
-        if (tier === 3) return 11; // 2. deild kvenna
+        if (tier <= 2) return 18;
+        if (tier === 3) return 11;
         return 10;
       }
-      if (tier <= 3) return 22;   // Tiers 1-3: 12 teams
-      if (tier === 4) return 18;  // 3. deild: 10 teams
-      if (tier === 5) return 14;  // 4. deild: 8 teams
-      return 22;                  // safe fallback
+      if (tier <= 3) return 22;
+      if (tier === 4) return 18;
+      if (tier === 5) return 14;
+      return 22;
     }
-    // isPrimaryYouth: only true for actual youth competitions (category-based), not T6 adult
-    // We check if the primary tier rows are youth competitions by category
+
     const primaryTierRows = playerRows.filter((r: any) => {
       const teamId = r.ksi_team_id ? String(r.ksi_team_id) : null;
       const ctx = teamId ? clubCtxBySeasonTeam.get(`${seasonYearCtx}-${teamId}`) ?? null : null;
@@ -849,37 +784,22 @@ export async function GET(req: Request) {
       (primaryTier >= 6 && primaryCategory !== "Fullorðnir" && primaryCategory !== "Adults");
     const maxGames = primaryTier < 99 ? maxGamesForTier(primaryTier, isPrimaryYouth, isWomen) : (isWomen ? 18 : 22);
 
-    const rawImportance = calcImportance({
-      minutes: totalMins,
-      starts: totalStarts,
-      goals: totalGoals,
-      yellows: totalYellows,
-      reds: totalReds,
-      maxGames,
-    });
-
-    // Apply tier+position ceiling.
-    // Base ceilings per tier — big gaps to reflect quality difference.
-    // Position within tier bridges up to 50% toward the tier above/below.
     function tierBaseCeiling(tier: number, isYouth: boolean): number {
       if (isYouth) return 22;
-      // Women's T3+ is amateur quality — treat same as youth ceiling
       if (isWomen && tier >= 3) return 22;
-      if (tier <= 1) return 92;  // 93-100 reserved for exceptional (goals+full season)
+      if (tier <= 1) return 92;
       if (tier === 2) return 78;
       if (tier === 3) return 64;
       if (tier === 4) return 50;
       if (tier === 5) return 36;
-      return 28;  // T6 adult — above youth but below T5
+      return 28;
     }
 
-    let importanceCeiling = 64; // sensible default if no tier data (assume mid-tier player)
+    let importanceCeiling = 64;
     if (primaryTier < 99) {
       const baseCeiling = tierBaseCeiling(primaryTier, isPrimaryYouth);
       const tierAboveCeiling = tierBaseCeiling(primaryTier - 1, false);
-      const tierBelowCeiling = tierBaseCeiling(primaryTier + 1, false);
 
-      // Find position context for primary club
       const primaryCtxEntry = [...playerRows]
         .map((r: any) => ({
           teamId: String(r.ksi_team_id ?? ""),
@@ -887,7 +807,6 @@ export async function GET(req: Request) {
         }))
         .filter(x => x.ctx && (x.ctx.competition_tier ?? 99) === primaryTier)[0];
 
-      // Use tier-based league size for position factor — partial match data is unreliable for league_size
       function leagueSizeForTier(tier: number): number {
         if (tier <= 3) return 12;
         if (tier === 4) return 10;
@@ -897,16 +816,27 @@ export async function GET(req: Request) {
       if (primaryCtxEntry?.ctx?.position != null) {
         const pos = primaryCtxEntry.ctx.position;
         const size = leagueSizeForTier(primaryTier);
-        // positionFactor: 1.0 = top, 0.0 = bottom
         const positionFactor = (size - pos) / (size - 1);
         const adjustment = positionFactor >= 0.5
-          ? (tierAboveCeiling - baseCeiling) * (positionFactor - 0.5)  // top half: bridge toward tier above
-          : 0; // bottom half: no downward bridging — tier ceiling is a floor, not a range
+          ? (tierAboveCeiling - baseCeiling) * (positionFactor - 0.5)
+          : 0;
         importanceCeiling = Math.round(baseCeiling + adjustment);
       } else {
         importanceCeiling = baseCeiling;
       }
     }
+
+    // FIX 2: pass ceiling into calcImportance so raw score is tier-scaled from the start.
+    // This prevents every regular starter collapsing to ceiling/ceiling.
+    const rawImportance = calcImportance({
+      minutes: totalMins,
+      starts: totalStarts,
+      goals: totalGoals,
+      yellows: totalYellows,
+      reds: totalReds,
+      maxGames,
+      importanceCeiling,
+    });
 
     return { importance: Math.min(rawImportance, importanceCeiling), ceiling: importanceCeiling };
   }
@@ -917,7 +847,6 @@ export async function GET(req: Request) {
     const playerRows = allRowsByPlayer.get(String(p.ksi_player_id)) ?? [];
     const prevPlayerRows = allPrevRowsByPlayer.get(String(p.ksi_player_id)) ?? [];
 
-    // For display: prefer the row from today's team, fallback to most minutes
     const teamRow = sideTeamId ? playerRows.find((row: any) => String(row.ksi_team_id) === sideTeamId) ?? null : null;
     const r = teamRow ?? (playerRows.length > 0 ? playerRows.reduce((a: any, b: any) => Number(a.minutes ?? 0) >= Number(b.minutes ?? 0) ? a : b) : null);
 
@@ -927,9 +856,6 @@ export async function GET(req: Request) {
     const sideStrength = side === "home" ? homeStrength : awayStrength;
     const strength = statTeamId ? (strengthByTeam.get(statTeamId) ?? 0.5) : sideStrength;
 
-    // Importance: blend current and previous season using sliding scale.
-    // The less current data exists, the more previous season counts (up to 30%).
-    // Players with no current data fall back to prev season only.
     const currResult = playerRows.length > 0
       ? calcWeightedImportance(playerRows, seasonYear)
       : null;
@@ -940,7 +866,6 @@ export async function GET(req: Request) {
     let importance = 0;
     let importanceCeiling = currResult?.ceiling ?? prevResult?.ceiling ?? 100;
     if (currResult !== null && prevResult !== null) {
-      // Sliding scale: prevWeight = 0.30 at 0 curr mins → 0 at 500+ curr mins
       const currMins = playerRows.reduce((sum: number, r: any) => sum + Number(r.minutes ?? 0), 0);
       const prevWeight = Math.max(0, 1 - (currMins / 500)) * 0.30;
       importance = Math.round(currResult.importance * (1 - prevWeight) + prevResult.importance * prevWeight);
@@ -951,9 +876,6 @@ export async function GET(req: Request) {
       importanceCeiling = prevResult.ceiling;
     }
 
-    // If a player is playing for a lower-tier team than their primary club,
-    // cap their importance ceiling to the match team's tier ceiling.
-    // e.g. a T1 fringe player starting for a T3 team should be rated as T3.
     const sideCtx = sideTeamId ? clubCtxBySeasonTeam.get(`${seasonYear}-${sideTeamId}`) ?? null : null;
     const sideTierRaw = Number(sideCtx?.competition_tier ?? 99);
     const sideTier = Number.isFinite(sideTierRaw) ? sideTierRaw : 99;
@@ -963,9 +885,6 @@ export async function GET(req: Request) {
         : (sideTier <= 1 ? 92 : sideTier === 2 ? 78 : sideTier === 3 ? 64 : sideTier === 4 ? 50 : sideTier === 5 ? 36 : 28);
       if (sideCeiling < importanceCeiling) {
         importanceCeiling = sideCeiling;
-        // Player has no stats for the side team and their primary club is higher tier —
-        // they're playing down (loan/dual reg). Use a default of 35% of side ceiling
-        // rather than near-zero from sparse higher-tier minutes.
         const hasTeamStats = sideTeamId
           ? (playerRows ?? []).some((r: any) => String(r.ksi_team_id) === sideTeamId && Number(r.minutes ?? 0) > 0)
           : false;
@@ -977,8 +896,6 @@ export async function GET(req: Request) {
       }
     }
 
-
-    // All prev season clubs for this player
     const prevSeasons = prevPlayerRows
       .sort((a: any, b: any) => Number(b.minutes ?? 0) - Number(a.minutes ?? 0))
       .map((pr: any) => {
@@ -1051,10 +968,12 @@ export async function GET(req: Request) {
     const likely = await getLikelyXI(teamId, seasonYear);
     const starterIds = new Set((side === "home" ? home.starters : away.starters).map((p) => String(p.ksi_player_id)));
 
-    const missingIds = likely.map((p) => String(p.ksi_player_id)).filter((id) => !starterIds.has(id));
+    // Filter to players not already starting. Also exclude bench players — they're present.
+    const benchIds = new Set((side === "home" ? home.bench : away.bench).map((p) => String(p.ksi_player_id)));
+    const presentIds = new Set([...starterIds, ...benchIds]);
+    const missingIds = likely.map((p) => String(p.ksi_player_id)).filter((id) => !presentIds.has(id));
     if (missingIds.length === 0) return { missing: [], missingImpact: 0 };
 
-    // Fetch current season stats + birth years in parallel (both keyed on missingIds)
     const [
       { data: missRows, error: missErr },
       { data: missingBirthRows },
@@ -1072,7 +991,6 @@ export async function GET(req: Request) {
 
     if (missErr) throw new Error(missErr.message);
 
-    // Fetch prev season rows for players with no current data
     const hasCurrData = new Set((missRows ?? []).map((r: any) => String(r.ksi_player_id)));
     const needsPrevIds = missingIds.filter((id) => !hasCurrData.has(id));
 
@@ -1087,14 +1005,34 @@ export async function GET(req: Request) {
 
     if (missPrevErr) throw new Error(missPrevErr.message);
 
-    const allMissRows = [...(missRows ?? []), ...(missPrevRows ?? [])];
+    // FIX 3: Load club context for missing players' clubs — these teams are not in
+    // statTeamIds (which only covers players in today's lineup), so calcWeightedImportance
+    // would treat all missing players as youth (ctx=null → isYouth=true → 0.35 discount),
+    // severely underrating them and producing near-identical low scores.
+    const missingTeamIds = Array.from(new Set(
+      [...(missRows ?? []), ...(missPrevRows ?? [])]
+        .map((r: any) => String(r.ksi_team_id ?? ""))
+        .filter(Boolean)
+        .filter((id) => !clubCtxBySeasonTeam.has(`${seasonYear}-${id}`) && !clubCtxBySeasonTeam.has(`${prevSeasonYear}-${id}`))
+    ));
+
+    if (missingTeamIds.length > 0) {
+      const { data: missingClubRows } = await supabaseAdmin
+        .from("computed_league_table")
+        .select("season_year, team_ksi_id, ksi_competition_id, played, points, competition_tier, competition_name, competition_category, position")
+        .in("season_year", [seasonYear, prevSeasonYear])
+        .in("team_ksi_id", missingTeamIds);
+
+      if (missingClubRows?.length) {
+        ingestClubRows(missingClubRows);
+      }
+    }
 
     const missingBirthById = new Map<string, number | null>();
     for (const r of missingBirthRows ?? []) {
       missingBirthById.set(String(r.ksi_player_id), r.birth_year ?? null);
     }
 
-    // Group by player — prefer current season rows, fall back to prev
     const missingRowsByPlayer = new Map<string, { rows: any[]; seasonCtx: number }>();
     for (const r of missRows ?? []) {
       const pid = String(r.ksi_player_id);
@@ -1109,9 +1047,23 @@ export async function GET(req: Request) {
       }
     }
 
+    // Get the match team's tier ceiling for capping missing player importance
+    const sideCtx = clubCtxBySeasonTeam.get(`${seasonYear}-${teamId}`) ?? null;
+    const sideTierRaw = Number(sideCtx?.competition_tier ?? 99);
+    const sideTier = Number.isFinite(sideTierRaw) ? sideTierRaw : 99;
+    const sideCeiling = sideTier < 99
+      ? (isWomen
+        ? (sideTier <= 1 ? 92 : sideTier <= 2 ? 78 : 22)
+        : (sideTier <= 1 ? 92 : sideTier === 2 ? 78 : sideTier === 3 ? 64 : sideTier === 4 ? 50 : sideTier === 5 ? 36 : 28))
+      : 100;
+
     const missing = Array.from(missingRowsByPlayer.entries()).map(([pid, { rows, seasonCtx }]) => {
       const best = rows.reduce((a, b) => Number(a.minutes ?? 0) >= Number(b.minutes ?? 0) ? a : b);
-      const { importance, ceiling: importanceCeiling } = calcWeightedImportance(rows, seasonCtx);
+      const { importance: rawImp, ceiling: rawCeiling } = calcWeightedImportance(rows, seasonCtx);
+
+      // Apply the same side-tier cap as enrich() does for lineup players
+      const importance = Math.min(rawImp, sideCeiling);
+      const importanceCeiling = Math.min(rawCeiling, sideCeiling);
 
       return {
         ksi_player_id: pid,
