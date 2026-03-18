@@ -92,28 +92,84 @@ export async function getMatchMeta(matchId: string): Promise<{
 
 
 // Likely XI: prefer starts, then minutes
+// REPLACEMENT for getLikelyXI in src/lib/queries.ts
+
 export async function getLikelyXI(teamId: string, seasonYear: number): Promise<LikelyXIPlayer[]> {
-  const { data, error } = await supabaseAdmin
-    .from("player_season_to_date")
-    .select("ksi_player_id, player_name, minutes, starts, goals")
-    .eq("season_year", seasonYear)
-    .eq("ksi_team_id", teamId)
-    .order("starts", { ascending: false })
-    .order("minutes", { ascending: false })
-    .limit(25);
+  const prevYear = seasonYear - 1;
 
-  if (error) throw new Error(error.message);
+  const [
+    { data: curData, error: curErr },
+    { data: prevData, error: prevErr },
+  ] = await Promise.all([
+    supabaseAdmin
+      .from("player_season_to_date")
+      .select("ksi_player_id, player_name, minutes, starts, goals")
+      .eq("season_year", seasonYear)
+      .eq("ksi_team_id", teamId)
+      .order("starts", { ascending: false })
+      .order("minutes", { ascending: false })
+      .limit(40),
+    supabaseAdmin
+      .from("player_season_to_date")
+      .select("ksi_player_id, player_name, minutes, starts, goals")
+      .eq("season_year", prevYear)
+      .eq("ksi_team_id", teamId)
+      .order("starts", { ascending: false })
+      .order("minutes", { ascending: false })
+      .limit(40),
+  ]);
 
-  const rows = (data ?? []) as LikelyXIPlayer[];
+  if (curErr) throw new Error(curErr.message);
+  if (prevErr) throw new Error(prevErr.message);
 
-  const starters = rows.filter((r) => (r.starts ?? 0) > 0).slice(0, 11);
-  if (starters.length === 11) return starters;
+  const curRows = (curData ?? []) as LikelyXIPlayer[];
+  const prevRows = (prevData ?? []) as LikelyXIPlayer[];
 
-  const used = new Set(starters.map((r) => r.ksi_player_id));
-  const fill = rows.filter((r) => !used.has(r.ksi_player_id)).slice(0, 11 - starters.length);
-  return [...starters, ...fill];
+  // Season progress: based on the most-started player this season.
+  // More reliable than total minutes which inflates for large squads.
+  const maxStartsCur = curRows.length > 0 ? Math.max(...curRows.map(r => r.starts ?? 0)) : 0;
+  const seasonProgress = Math.min(1, maxStartsCur / 18);
+
+  const prevById = new Map<string, LikelyXIPlayer>();
+  for (const r of prevRows) prevById.set(String(r.ksi_player_id), r);
+
+  const scores = new Map<string, { player: LikelyXIPlayer; score: number }>();
+
+  // Score current season players, blending in prev for low-starts players
+  for (const r of curRows) {
+    const id = String(r.ksi_player_id);
+    const curScore = (r.starts ?? 0) * 90 + (r.minutes ?? 0);
+    const prev = prevById.get(id);
+    const prevScore = prev ? (prev.starts ?? 0) * 90 + (prev.minutes ?? 0) : 0;
+    const curStarts = r.starts ?? 0;
+    const curWeight = Math.min(1, seasonProgress + (curStarts / 15) * 0.5);
+    const prevWeight = (1 - curWeight) * 0.6;
+    scores.set(id, { player: r, score: curScore * curWeight + prevScore * prevWeight });
+  }
+
+  // Add prev-season-only players (absent from current season for this team).
+  // These are the genuine regulars who may be injured/transferred — always relevant.
+  // Minimum 8 starts last season to qualify. Weight decays but never hits zero.
+  for (const r of prevRows) {
+    const id = String(r.ksi_player_id);
+    if (scores.has(id)) continue;
+    if ((r.starts ?? 0) < 8) continue;
+    const prevScore = (r.starts ?? 0) * 90 + (r.minutes ?? 0);
+    const prevWeight = 0.50 - (seasonProgress * 0.35); // 0.50 early → 0.15 late season
+    scores.set(id, { player: r, score: prevScore * prevWeight });
+  }
+
+  // Return ALL qualifying players — no fixed slice.
+  // buildMissingLikelyXI will filter to those not present in today's squad.
+  // A minimum score threshold keeps genuinely fringe players out.
+  // Score of 450 ≈ 5 starts × 90 mins — a player who's featured meaningfully.
+  const MIN_SCORE = 450;
+
+  return Array.from(scores.values())
+    .filter(x => x.score >= MIN_SCORE)
+    .sort((a, b) => b.score - a.score)
+    .map(x => x.player);
 }
-
 /**
  * NEW: season-to-date rows for a list of players (used in lineup preview)
  */
