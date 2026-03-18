@@ -414,9 +414,10 @@ export default function HomePage() {
 function ModelCard({ analysis }: { analysis: any }) {
   const p = analysis.probabilities;
   const odds = analysis.odds;
+  const goals = analysis.goals;
 
-  const homeStrength = analysis.teamStrength?.home ?? 0;
-  const awayStrength = analysis.teamStrength?.away ?? 0;
+  const homeStrength = analysis.teamStrengthDebug?.home?.strength ?? analysis.teamStrength?.home ?? 0;
+  const awayStrength = analysis.teamStrengthDebug?.away?.strength ?? analysis.teamStrength?.away ?? 0;
   const homeName = analysis.teams?.home?.team_name ?? "Home";
   const awayName = analysis.teams?.away?.team_name ?? "Away";
 
@@ -443,10 +444,10 @@ function ModelCard({ analysis }: { analysis: any }) {
         </div>
       )}
 
-      {/* Fair odds */}
+      {/* Match odds */}
       {odds && (
         <div className="flex items-center gap-4 pb-4 border-b border-white/5">
-          <span className="text-xs text-white/30 font-mono uppercase tracking-wider">Fair odds</span>
+          <span className="text-xs text-white/30 font-mono uppercase tracking-wider">Match odds</span>
           <div className="flex gap-4 text-sm font-mono">
             <span><span className="text-white/40">H</span> <span className="text-blue-300">{odds.home?.toFixed(2)}</span></span>
             <span><span className="text-white/40">D</span> <span className="text-white/60">{odds.draw?.toFixed(2)}</span></span>
@@ -455,7 +456,47 @@ function ModelCard({ analysis }: { analysis: any }) {
         </div>
       )}
 
-      {/* Team strength comparison */}
+      {/* Goals markets */}
+      {goals && (
+        <div className="mt-4 pb-4 border-b border-white/5">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs text-white/30 font-mono uppercase tracking-wider">Expected goals</span>
+            <div className="flex items-center gap-3 text-sm font-mono">
+              <span className="text-blue-300">{goals.xG.home.toFixed(2)}</span>
+              <span className="text-white/20">—</span>
+              <span className="text-orange-300">{goals.xG.away.toFixed(2)}</span>
+              <span className="text-white/30 text-xs">({goals.expectedTotal} total)</span>
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            {[
+              { label: "Over 1.5", prob: goals.markets.over15.prob, odds: goals.markets.over15.odds },
+              { label: "Over 2.5", prob: goals.markets.over25.prob, odds: goals.markets.over25.odds },
+              { label: "Over 3.5", prob: goals.markets.over35.prob, odds: goals.markets.over35.odds },
+              { label: "Under 2.5", prob: goals.markets.under25.prob, odds: goals.markets.under25.odds },
+              { label: "BTTS Yes", prob: goals.markets.btts_yes.prob, odds: goals.markets.btts_yes.odds },
+              { label: "BTTS No", prob: goals.markets.btts_no.prob, odds: goals.markets.btts_no.odds },
+            ].map(({ label, prob, odds: mOdds }) => {
+              const pct = Math.round(prob * 100);
+              const isFav = prob >= 0.55;
+              const isLong = prob < 0.30;
+              const textColor = isFav ? "text-emerald-400" : isLong ? "text-white/40" : "text-white/70";
+              const bgColor = isFav ? "bg-emerald-950/30 border-emerald-500/15" : "bg-white/3 border-white/6";
+              return (
+                <div key={label} className={`rounded-lg border px-3 py-2 ${bgColor}`}>
+                  <div className="text-xs text-white/35 font-mono mb-1">{label}</div>
+                  <div className="flex items-baseline justify-between gap-1">
+                    <span className={`text-sm font-bold font-mono ${textColor}`}>{pct}%</span>
+                    <span className="text-xs font-mono text-white/30">{mOdds?.toFixed(2)}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Team strength */}
       <div className="mt-4 grid grid-cols-2 gap-3">
         {([
           { name: homeName, strength: homeStrength, tier: analysis.teamStrengthDebug?.home?.competition_tier, color: "blue" as const },
@@ -463,7 +504,6 @@ function ModelCard({ analysis }: { analysis: any }) {
         ]).map(({ name, strength, tier, color }) => {
           const str = Math.round(strength * 100);
           const isBlue = color === "blue";
-
           const tierLabel = tier != null ? `T${tier}` : "—";
           const tierColor =
             tier == null  ? "text-white/20 bg-white/5 border-white/5" :
@@ -472,29 +512,17 @@ function ModelCard({ analysis }: { analysis: any }) {
             tier === 3    ? "text-yellow-300 bg-yellow-950/60 border-yellow-500/20" :
             tier === 4    ? "text-orange-300 bg-orange-950/60 border-orange-500/20" :
                             "text-red-300 bg-red-950/60 border-red-500/20";
-
           const barColor = isBlue ? "bg-blue-500" : "bg-orange-500";
-          const barW = Math.max(2, str);
-
           return (
             <div key={name} className="rounded-lg bg-white/3 border border-white/5 px-3 py-2.5">
               <div className="flex items-center justify-between mb-2">
-                <span className={`text-xs font-mono font-semibold px-1.5 py-0.5 rounded border ${tierColor}`}>
-                  {tierLabel}
-                </span>
-                <span className="text-xs font-mono text-white/50">
-                  {str}<span className="text-white/20">/100</span>
-                </span>
+                <span className={`text-xs font-mono font-semibold px-1.5 py-0.5 rounded border ${tierColor}`}>{tierLabel}</span>
+                <span className="text-xs font-mono text-white/50">{str}<span className="text-white/20">/100</span></span>
               </div>
               <div className="h-1.5 rounded-full bg-white/8 overflow-hidden mb-2">
-                <div
-                  className={`h-full rounded-full ${barColor} transition-all duration-500`}
-                  style={{ width: `${barW}%` }}
-                />
+                <div className={`h-full rounded-full ${barColor} transition-all duration-500`} style={{ width: `${Math.max(2, str)}%` }} />
               </div>
-              <div className={`text-xs font-medium truncate ${isBlue ? "text-blue-300/80" : "text-orange-300/80"}`}>
-                {name}
-              </div>
+              <div className={`text-xs font-medium truncate ${isBlue ? "text-blue-300/80" : "text-orange-300/80"}`}>{name}</div>
             </div>
           );
         })}
@@ -518,17 +546,17 @@ function MissingLikelyXI({
   // Colour based on ratio of importance to ceiling — reflects quality within their tier
   function impactColor(imp: number, ceiling: number): string {
     const ratio = ceiling > 0 ? imp / ceiling : 0;
-    if (ratio >= 0.90) return "text-emerald-400";  // key player — near their ceiling
-    if (ratio >= 0.75) return "text-green-400";    // regular starter
-    if (ratio >= 0.55) return "text-yellow-400";   // rotation
-    return "text-white/35";                        // fringe
+    if (ratio >= 0.80) return "text-emerald-400";
+    if (ratio >= 0.60) return "text-green-400";
+    if (ratio >= 0.40) return "text-yellow-400";
+    return "text-white/35";
   }
-
+ 
   function impactLabel(imp: number, ceiling: number): string {
     const ratio = ceiling > 0 ? imp / ceiling : 0;
-    if (ratio >= 0.90) return "Key";
-    if (ratio >= 0.75) return "Regular";
-    if (ratio >= 0.55) return "Squad";
+    if (ratio >= 0.80) return "Key";
+    if (ratio >= 0.60) return "Regular";
+    if (ratio >= 0.40) return "Squad";
     return "";
   }
 
@@ -545,6 +573,7 @@ function MissingLikelyXI({
           const ceiling = p.importanceCeiling ?? 100;
           const color = impactColor(p.importance, ceiling);
           const label = impactLabel(p.importance, ceiling);
+
           return (
             <div key={p.ksi_player_id} className="flex items-center justify-between py-1.5 px-2 rounded-lg hover:bg-white/3 transition-colors">
               <div className="flex items-center gap-2 min-w-0">
@@ -631,15 +660,14 @@ function PlayerAnalysisTable({ title, rows, accent }: { title: string; rows: any
             ) : (
               rows.map((p) => {
                 const isOpen = expanded.has(p.ksi_player_id);
+                // Only count starts for the team playing today, not youth/other clubs
+                const starts = p.season?.starts ?? 0;
                 const imp = p.importance ?? 0;
                 const ceiling = p.importanceCeiling ?? 100;
                 const impRatio = ceiling > 0 ? imp / ceiling : 0;
-                const impColor = impRatio >= 0.75 ? "text-emerald-400" : impRatio >= 0.55 ? "text-yellow-400" : imp >= 15 ? "text-white/70" : "text-white/30";
-                const rowHighlight = impRatio >= 0.75
-                  ? `border-l-2 border-l-emerald-500 bg-emerald-950/20`
-                  : impRatio >= 0.55
-                  ? `border-l-2 border-l-yellow-500/50 bg-yellow-950/10`
-                  : "";
+                // Colour by starts — reflects actual playing time, not abstract ceiling ratio
+                const impColor = imp < 30 ? "text-white/30" : impRatio >= 0.80 ? "text-emerald-400" : impRatio >= 0.60 ? "text-green-400" : impRatio >= 0.40 ? "text-yellow-400" : "text-white/70";
+                const rowHighlight = imp < 30 ? "" : impRatio >= 0.80 ? `border-l-2 border-l-emerald-500 bg-emerald-950/20` : impRatio >= 0.60 ? `border-l-2 border-l-green-500/40 bg-green-950/10` : impRatio >= 0.40 ? `border-l-2 border-l-yellow-500/50 bg-yellow-950/10` : "";
 
                 return (
                   <React.Fragment key={p.ksi_player_id}>

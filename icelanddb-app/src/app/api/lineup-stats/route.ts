@@ -175,7 +175,15 @@ function sideRating(side: { starters: any[]; bench: any[] }, sideStrength: numbe
   const cappedHistStrength = histStrength * historyCap;
   const rawEffective = clamp01(cappedHistStrength * histWeight + avgStarterImp * lineupWeight);
   const tierFloor = histStrength * 0.40 * Math.min(1, avgStarterImp / Math.max(histStrength, 0.01));
-  const effectiveStrength = Math.max(rawEffective, tierFloor);
+  const rawEffectiveWithFloor = Math.max(rawEffective, tierFloor);
+
+  // Untracked squad penalty: if starters have near-zero importance scores,
+  // they are youth/unregistered players with no stats — treat as severely weakened.
+  // avgImpRatio of 0 = fully untracked, 1 = full strength tracked squad.
+  // At avgImpRatio=0 → 70% reduction. At avgImpRatio≥0.125 → no penalty.
+  const avgImpRatio = side.starters.length > 0 ? (starterSum / side.starters.length) / 100 : 0;
+  const untrackedPenalty = clamp01(1 - avgImpRatio * 8);
+  const effectiveStrength = rawEffectiveWithFloor * (1 - untrackedPenalty * 0.70);
 
   const raw = starterSum + benchSum * 0.35;
   const scaled = raw * (0.85 + 0.30 * effectiveStrength);
@@ -243,20 +251,31 @@ function computeOdds(params: {
   const rawStrengthDiff = clamp(params.homeRawStrength - params.awayRawStrength, -1, 1);
   const strengthZ = rawStrengthDiff * 6.5;
 
-  const lineupZ = 0;
+  // Missing player impact — direct z-score adjustment.
+  // Normalise against 4× tier ceiling (fully depleted squad = 1.0), scale to ±1.5 z.
+  // This is the single biggest situational factor — a team missing Key players
+  // should see a meaningful swing in win probability.
+  const MISSING_CEILINGS: Record<number, number> = { 1: 92, 2: 78, 3: 64, 4: 50, 5: 36 };
+  const homeMissingNorm = clamp(params.homeMissingImpact / ((MISSING_CEILINGS[homeTier] ?? 64) * 4), 0, 1);
+  const awayMissingNorm = clamp(params.awayMissingImpact / ((MISSING_CEILINGS[awayTier] ?? 64) * 4), 0, 1);
+  // Positive = away missing more (helps home); negative = home missing more (hurts home)
+  const missingAdj = (awayMissingNorm - homeMissingNorm) * 1.5;
 
-  // Tier adjustment: favours the structurally stronger (lower tier number) team.
-  // (awayTier - homeTier): positive when home is weaker tier → negative z → away favoured. ✓
-  // (awayTier - homeTier): negative when home is stronger tier → positive z → home favoured. ✓
-  // Multiplier reduced from 1.50 → 0.50: a 1-tier gap contributes ±0.50 to z,
-  // proportionate alongside strengthZ and homeAdv without swamping them.
+  function lineupBaseline(tier: number): number {
+    if (tier <= 1) return 500; if (tier === 2) return 380; if (tier === 3) return 300;
+    if (tier === 4) return 220; return 160;
+  }
+  const homeLineupRatio = clamp(params.homeLineupTotal / lineupBaseline(homeTier), 0, 1.5);
+  const awayLineupRatio = clamp(params.awayLineupTotal / lineupBaseline(awayTier), 0, 1.5);
+  const lineupZ = (homeLineupRatio - awayLineupRatio) * 1.5;
+
   const tierAdv = clamp((awayTier - homeTier) * 0.50, -2.0, 2.0);
 
   const avgTier = ((homeTier ?? 3) + (awayTier ?? 3)) / 2;
   const homeAdv = clamp(0.40 - (avgTier - 1) * 0.10, 0.05, 0.40);
 
-  const z = strengthZ + lineupZ + tierAdv + homeAdv;
-
+  const z = strengthZ + lineupZ + missingAdj + tierAdv + homeAdv;
+  
   const pHomeRaw = sigmoid(z);
   const pAwayRaw = 1 - pHomeRaw;
 
@@ -272,6 +291,101 @@ function computeOdds(params: {
       home: pHome > 0 ? 1 / pHome : null,
       draw: pDraw > 0 ? 1 / pDraw : null,
       away: pAway > 0 ? 1 / pAway : null,
+    },
+  };
+}
+
+// Real Icelandic league goal averages from DB (home, away) by tier
+// Tier: [avg_home, avg_away]
+const TIER_GOAL_BASELINES: Record<number, [number, number]> = {
+  1: [1.87, 1.50],
+  2: [1.99, 1.56],
+  3: [2.37, 1.85],
+  4: [2.19, 1.80],
+  5: [2.96, 2.16],
+};
+
+function poissonPmf(lambda: number, k: number): number {
+  // P(X=k) for Poisson(lambda)
+  if (lambda <= 0) return k === 0 ? 1 : 0;
+  let logP = -lambda + k * Math.log(lambda);
+  for (let i = 1; i <= k; i++) logP -= Math.log(i);
+  return Math.exp(logP);
+}
+
+function computeGoals(params: {
+  homeTier: number | null;
+  awayTier: number | null;
+  homeStrength: number;
+  awayStrength: number;
+  homeMissingGoals: number;  // goals/game lost from missing players
+  awayMissingGoals: number;
+  homeMissingImpact: number;
+  awayMissingImpact: number;
+}) {
+  const homeTier = Number.isFinite(Number(params.homeTier)) ? Number(params.homeTier) : 3;
+  const awayTier = Number.isFinite(Number(params.awayTier)) ? Number(params.awayTier) : 3;
+
+  // Use the average tier for baseline — cross-tier matches sit between both
+  const avgTier = Math.round((homeTier + awayTier) / 2);
+  const baseline = TIER_GOAL_BASELINES[avgTier] ?? TIER_GOAL_BASELINES[3];
+  let [baseHome, baseAway] = baseline;
+
+  // Adjust for relative team strength using tier-relative average.
+  // A global avgStrength of 0.35 breaks at lower tiers where all teams have str < 0.15 —
+  // every team looks "well below average" and xG collapses toward the 0.5 floor.
+  // Using tier-relative averages keeps equal-strength teams at the baseline.
+  // Tier-relative average strength — keeps equal teams at the baseline.
+  // A global avg of 0.35 breaks lower tiers where all teams have str < 0.15.
+  const TIER_AVG: Record<number, number> = { 1: 0.42, 2: 0.28, 3: 0.18, 4: 0.12, 5: 0.07 };
+  const avgStrength = TIER_AVG[Math.round((homeTier + awayTier) / 2)] ?? 0.18;
+
+  // Attack modifier only — no separate defence modifier.
+  // A defence modifier double-penalises the weaker team and collapses away xG.
+  // Attack strength already captures the quality difference.
+  const homeAttackMod = clamp(1 + (params.homeStrength - avgStrength) * 2.0, 0.6, 1.6);
+  const awayAttackMod = clamp(1 + (params.awayStrength - avgStrength) * 2.0, 0.6, 1.6);
+
+  let homeXG = baseHome * homeAttackMod;
+  let awayXG = baseAway * awayAttackMod;
+
+  // Apply missing goalscorer penalty as a capped percentage reduction.
+  // Direct subtraction floors xG at 0.3 when many players are missing.
+  // Cap at 20% reduction — losing key scorers hurts but the rest of the team still scores.
+  const homeMissingReduction = clamp(params.homeMissingGoals / (baseHome * 2), 0, 0.20);
+  const awayMissingReduction = clamp(params.awayMissingGoals / (baseAway * 2), 0, 0.20);
+  homeXG = homeXG * (1 - homeMissingReduction);
+  awayXG = awayXG * (1 - awayMissingReduction);
+
+  // Scoreline probabilities up to 6 goals per side
+  const MAX_GOALS = 6;
+  let p_over15 = 0, p_over25 = 0, p_over35 = 0, p_btts = 0;
+  let p_under15 = 0, p_under25 = 0;
+
+  for (let h = 0; h <= MAX_GOALS; h++) {
+    for (let a = 0; a <= MAX_GOALS; a++) {
+      const p = poissonPmf(homeXG, h) * poissonPmf(awayXG, a);
+      const total = h + a;
+      if (total > 1.5) p_over15 += p;
+      if (total > 2.5) p_over25 += p;
+      if (total > 3.5) p_over35 += p;
+      if (h > 0 && a > 0) p_btts += p;
+      if (total < 1.5) p_under15 += p;
+      if (total < 2.5) p_under25 += p;
+    }
+  }
+
+  return {
+    xG: { home: Math.round(homeXG * 100) / 100, away: Math.round(awayXG * 100) / 100 },
+    expectedTotal: Math.round((homeXG + awayXG) * 10) / 10,
+    markets: {
+      over15: { prob: p_over15, odds: p_over15 > 0 ? 1 / p_over15 : null },
+      under15: { prob: p_under15, odds: p_under15 > 0 ? 1 / p_under15 : null },
+      over25: { prob: p_over25, odds: p_over25 > 0 ? 1 / p_over25 : null },
+      under25: { prob: p_under25, odds: p_under25 > 0 ? 1 / p_under25 : null },
+      over35: { prob: p_over35, odds: p_over35 > 0 ? 1 / p_over35 : null },
+      btts_yes: { prob: p_btts, odds: p_btts > 0 ? 1 / p_btts : null },
+      btts_no: { prob: 1 - p_btts, odds: (1 - p_btts) > 0 ? 1 / (1 - p_btts) : null },
     },
   };
 }
@@ -326,9 +440,22 @@ function strengthFromRow(row: any, leagueSize: number | null) {
   };
 }
 
-function blendStrength(current: number, prev: number, played: number) {
+function blendStrength(current: number, prev: number, played: number, tier: number | null = null) {
   const w = clamp01(played / 8);
-  return clamp01(w * current + (1 - w) * prev);
+  const blended = w * current + (1 - w) * prev;
+
+  // Tier floor: minimum strength regardless of early-season results.
+  // Diminishes to zero by game 8 — after that trust the data.
+  const TIER_FLOORS: Record<number, number> = { 1: 0.55, 2: 0.35, 3: 0.20, 4: 0.12, 5: 0.06 };
+  // Tier ceiling: a lower-tier team can never exceed the floor of the tier above.
+  // This ensures T2 teams always rate above T3 teams, T3 above T4 etc.
+  const TIER_CEILINGS: Record<number, number> = { 1: 1.00, 2: 0.54, 3: 0.34, 4: 0.19, 5: 0.11 };
+  const t = Number.isFinite(Number(tier)) ? Number(tier) : null;
+  const floor = t !== null ? (TIER_FLOORS[t] ?? 0.04) : 0;
+  const ceiling = t !== null ? (TIER_CEILINGS[t] ?? 1.0) : 1.0;
+  const effectiveFloor = floor * Math.max(0, 1 - played / 8);
+  const withFloor = Math.max(blended, effectiveFloor);
+  return clamp01(Math.min(withFloor, ceiling));
 }
 
 export async function GET(req: Request) {
@@ -477,33 +604,27 @@ export async function GET(req: Request) {
       if (nm) teamNameById.set(id, String(nm));
     }
 
-    const leagueSizeByComp = new Map<string, number>();
-    for (const r of curRows ?? []) {
-      const compId = String((r as any).ksi_competition_id ?? "");
-      if (!compId) continue;
-      leagueSizeByComp.set(compId, (leagueSizeByComp.get(compId) ?? 0) + 1);
-    }
-
     const bestCur = pickBestRowPerTeam(curRows ?? []);
-
-    const prevLeagueSizeByComp = new Map<string, number>();
-    for (const r of prevRows ?? []) {
-      const compId = String((r as any).ksi_competition_id ?? "");
-      if (!compId) continue;
-      prevLeagueSizeByComp.set(compId, (prevLeagueSizeByComp.get(compId) ?? 0) + 1);
-    }
-
     const bestPrev = pickBestRowPerTeam(prevRows ?? []);
+
+    // Use tier-based league size rather than counting rows in curRows/prevRows.
+    // teamIdsToLoad only covers today's lineup players' clubs — so the competition
+    // may appear to have only 2-3 teams, making posMultiplier collapse near zero.
+    function leagueSizeForStrength(tier: number | null): number | null {
+      const t = Number.isFinite(Number(tier)) ? Number(tier) : null;
+      if (t === null) return null;
+      if (t <= 3) return 12;
+      if (t === 4) return 10;
+      if (t === 5) return 8;
+      return 12;
+    }
 
     for (const id of teamIdsToLoad) {
       const cur = bestCur.get(id);
       const prev = bestPrev.get(id);
 
-      const curCompId = cur ? String((cur as any).ksi_competition_id ?? "") : "";
-      const prevCompId = prev ? String((prev as any).ksi_competition_id ?? "") : "";
-
-      const curLeagueSize = curCompId ? (leagueSizeByComp.get(curCompId) ?? null) : null;
-      const prevLeagueSize = prevCompId ? (prevLeagueSizeByComp.get(prevCompId) ?? null) : null;
+      const curLeagueSize = cur ? leagueSizeForStrength(Number(cur.competition_tier ?? null)) : null;
+      const prevLeagueSize = prev ? leagueSizeForStrength(Number(prev.competition_tier ?? null)) : null;
 
       const curS = cur ? strengthFromRow(cur, curLeagueSize) : null;
       const prevS = prev ? strengthFromRow(prev, prevLeagueSize) : null;
@@ -512,7 +633,8 @@ export async function GET(req: Request) {
       const prevStrength = prevS?.strength ?? 0.5;
 
       const played = curS?.played ?? 0;
-      const finalStrength = blendStrength(curStrength, prevStrength, played);
+      const blendTier = curS?.tier ?? prevS?.tier ?? null;
+      const finalStrength = blendStrength(curStrength, prevStrength, played, blendTier);
 
       strengthByTeam.set(id, finalStrength);
 
@@ -1120,6 +1242,24 @@ export async function GET(req: Request) {
     awayMissingImpact: awayMissing.missingImpact,
   });
 
+  // Goals per game lost from missing scorers — sum goals/maxGames for each missing player
+  function missingGoalsPerGame(missing: any[], tier: number | null): number {
+    const t = Number.isFinite(Number(tier)) ? Number(tier) : 3;
+    const maxG = t <= 3 ? 22 : t === 4 ? 18 : 14;
+    return missing.reduce((s, p) => s + (Number(p.goals ?? 0) / maxG), 0);
+  }
+
+  const goalsModel = computeGoals({
+    homeTier,
+    awayTier,
+    homeStrength: homeStrength,  // raw historical strength, not lineup-blended
+    awayStrength: awayStrength,  // same
+    homeMissingGoals: missingGoalsPerGame(homeMissing.missing, homeTier),
+    awayMissingGoals: missingGoalsPerGame(awayMissing.missing, awayTier),
+    homeMissingImpact: homeMissing.missingImpact,
+    awayMissingImpact: awayMissing.missingImpact,
+  });
+
   return NextResponse.json({
     inputUrl,
     season_year: seasonYear,
@@ -1133,6 +1273,7 @@ export async function GET(req: Request) {
 
     overall: { home: homeOverall, away: awayOverall },
     ...pricing,
+    goals: goalsModel,
 
     home: {
       ...home,
