@@ -10,6 +10,6 @@
     "resolveJsonModule": true,
     "outDir": "./dist"
   },
-  "include": ["scripts/**/*"],
+  "include": ["scripts/**/*", "icelanddb-app/scripts/evaluate-lineup-model.ts"],
   "exclude": ["node_modules", "dist", "icelanddb-app"]
 }

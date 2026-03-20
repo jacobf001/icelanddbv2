@@ -249,7 +249,7 @@ function computeOdds(params: {
   const awayTier = Number.isFinite(Number(params.awayTier)) ? Number(params.awayTier) : 6;
 
   const rawStrengthDiff = clamp(params.homeRawStrength - params.awayRawStrength, -1, 1);
-  const strengthZ = rawStrengthDiff * 6.5;
+  const strengthZ = rawStrengthDiff * 5.8;
 
   // Missing player impact — direct z-score adjustment.
   // Normalise against 4× tier ceiling (fully depleted squad = 1.0), scale to ±1.5 z.
@@ -258,24 +258,20 @@ function computeOdds(params: {
   const MISSING_CEILINGS: Record<number, number> = { 1: 92, 2: 78, 3: 64, 4: 50, 5: 36 };
   const homeMissingNorm = clamp(params.homeMissingImpact / ((MISSING_CEILINGS[homeTier] ?? 64) * 4), 0, 1);
   const awayMissingNorm = clamp(params.awayMissingImpact / ((MISSING_CEILINGS[awayTier] ?? 64) * 4), 0, 1);
-  // Positive = away missing more (helps home); negative = home missing more (hurts home)
-  const missingAdj = (awayMissingNorm - homeMissingNorm) * 1.5;
+  // Cap missing impact swing based on tier gap — missing players can't override structural tier advantage.
+  // A 3-tier gap means even a fully depleted T3 side should beat a full-strength T6 side.
+  const tierGap = Math.abs(homeTier - awayTier);
+  const missingCap = clamp(1.0 - tierGap * 0.25, 0.10, 1.0);
+  const missingAdj = (awayMissingNorm - homeMissingNorm) * 0.9 * missingCap;
 
-  function lineupBaseline(tier: number): number {
-    if (tier <= 1) return 500; if (tier === 2) return 380; if (tier === 3) return 300;
-    if (tier === 4) return 220; return 160;
-  }
-  const homeLineupRatio = clamp(params.homeLineupTotal / lineupBaseline(homeTier), 0, 1.5);
-  const awayLineupRatio = clamp(params.awayLineupTotal / lineupBaseline(awayTier), 0, 1.5);
-  const lineupZ = (homeLineupRatio - awayLineupRatio) * 1.5;
-
-  const tierAdv = clamp((awayTier - homeTier) * 0.50, -2.0, 2.0);
+  // Tier advantage scales non-linearly for large gaps
+  const tierAdv = clamp((awayTier - homeTier) * 1.0 + Math.sign(awayTier - homeTier) * Math.max(0, Math.abs(awayTier - homeTier) - 1) * 0.5, -4.0, 4.0);
 
   const avgTier = ((homeTier ?? 3) + (awayTier ?? 3)) / 2;
   const homeAdv = clamp(0.40 - (avgTier - 1) * 0.10, 0.05, 0.40);
 
-  const z = strengthZ + lineupZ + missingAdj + tierAdv + homeAdv;
-  
+  const z = strengthZ + missingAdj + tierAdv + homeAdv;
+
   const pHomeRaw = sigmoid(z);
   const pAwayRaw = 1 - pHomeRaw;
 
@@ -299,10 +295,11 @@ function computeOdds(params: {
 // Tier: [avg_home, avg_away]
 const TIER_GOAL_BASELINES: Record<number, [number, number]> = {
   1: [1.87, 1.50],
-  2: [1.99, 1.56],
-  3: [2.37, 1.85],
-  4: [2.19, 1.80],
-  5: [2.96, 2.16],
+  2: [1.96, 1.60],
+  3: [2.28, 1.80],
+  4: [2.19, 1.81],
+  5: [2.76, 2.26],
+  6: [2.96, 2.36],
 };
 
 function poissonPmf(lambda: number, k: number): number {
@@ -318,7 +315,7 @@ function computeGoals(params: {
   awayTier: number | null;
   homeStrength: number;
   awayStrength: number;
-  homeMissingGoals: number;  // goals/game lost from missing players
+  homeMissingGoals: number;
   awayMissingGoals: number;
   homeMissingImpact: number;
   awayMissingImpact: number;
@@ -326,38 +323,54 @@ function computeGoals(params: {
   const homeTier = Number.isFinite(Number(params.homeTier)) ? Number(params.homeTier) : 3;
   const awayTier = Number.isFinite(Number(params.awayTier)) ? Number(params.awayTier) : 3;
 
-  // Use the average tier for baseline — cross-tier matches sit between both
-  const avgTier = Math.round((homeTier + awayTier) / 2);
-  const baseline = TIER_GOAL_BASELINES[avgTier] ?? TIER_GOAL_BASELINES[3];
-  let [baseHome, baseAway] = baseline;
+  const homeBaseline = TIER_GOAL_BASELINES[homeTier] ?? TIER_GOAL_BASELINES[3];
+  const awayBaseline = TIER_GOAL_BASELINES[awayTier] ?? TIER_GOAL_BASELINES[3];
+  let baseHome = homeBaseline[0];
+  let baseAway = awayBaseline[1];
 
-  // Adjust for relative team strength using tier-relative average.
-  // A global avgStrength of 0.35 breaks at lower tiers where all teams have str < 0.15 —
-  // every team looks "well below average" and xG collapses toward the 0.5 floor.
-  // Using tier-relative averages keeps equal-strength teams at the baseline.
-  // Tier-relative average strength — keeps equal teams at the baseline.
-  // A global avg of 0.35 breaks lower tiers where all teams have str < 0.15.
-  const TIER_AVG: Record<number, number> = { 1: 0.42, 2: 0.28, 3: 0.18, 4: 0.12, 5: 0.07 };
-  const avgStrength = TIER_AVG[Math.round((homeTier + awayTier) / 2)] ?? 0.18;
+  // Cross-tier baseline adjustment — BEFORE attack modifier is applied.
+  // A stronger away team attacking weaker opposition scores closer to their home rate.
+  // A stronger home team defending a weaker away side also shifts baselines.
+  const awayTierAdv = Math.max(0, homeTier - awayTier); // away is stronger by this many tiers
+  const homeTierAdv = Math.max(0, awayTier - homeTier); // home is stronger by this many tiers
 
-  // Attack modifier only — no separate defence modifier.
-  // A defence modifier double-penalises the weaker team and collapses away xG.
-  // Attack strength already captures the quality difference.
-  const homeAttackMod = clamp(1 + (params.homeStrength - avgStrength) * 2.0, 0.6, 1.6);
-  const awayAttackMod = clamp(1 + (params.awayStrength - avgStrength) * 2.0, 0.6, 1.6);
+  // Blend away attack baseline toward their home rate as tier advantage increases.
+  // Max blend at 3+ tier gap (75% toward home rate).
+  const awayBaselineHome = (TIER_GOAL_BASELINES[awayTier] ?? TIER_GOAL_BASELINES[3])[0];
+  baseAway = baseAway + (awayBaselineHome - baseAway) * clamp(awayTierAdv * 0.25, 0, 0.75);
+
+  // Blend home attack baseline toward their away rate if away team is stronger.
+  const homeBaselineAway = (TIER_GOAL_BASELINES[homeTier] ?? TIER_GOAL_BASELINES[3])[1];
+  baseHome = baseHome + (homeBaselineAway - baseHome) * clamp(homeTierAdv * 0.25, 0, 0.75);
+
+  // Strength modifier relative to own-tier average.
+  const TIER_AVG: Record<number, number> = { 1: 0.42, 2: 0.28, 3: 0.18, 4: 0.12, 5: 0.07, 6: 0.04 };
+  const homeAvgStrength = TIER_AVG[homeTier] ?? 0.18;
+  const awayAvgStrength = TIER_AVG[awayTier] ?? 0.18;
+
+  const homeAttackMod = clamp(1 + (params.homeStrength - homeAvgStrength) * 2.0, 0.6, 1.6);
+  const awayAttackMod = clamp(1 + (params.awayStrength - awayAvgStrength) * 2.0, 0.6, 1.6);
 
   let homeXG = baseHome * homeAttackMod;
   let awayXG = baseAway * awayAttackMod;
 
-  // Apply missing goalscorer penalty as a capped percentage reduction.
-  // Direct subtraction floors xG at 0.3 when many players are missing.
-  // Cap at 20% reduction — losing key scorers hurts but the rest of the team still scores.
-  const homeMissingReduction = clamp(params.homeMissingGoals / (baseHome * 2), 0, 0.20);
-  const awayMissingReduction = clamp(params.awayMissingGoals / (baseAway * 2), 0, 0.20);
+  // Cross-tier suppression: only the weaker team's attack is reduced.
+  const homeIsWeakerByTiers = Math.max(0, homeTier - awayTier);
+  const awayIsWeakerByTiers = Math.max(0, awayTier - homeTier);
+
+  homeXG = homeXG * clamp(1 - homeIsWeakerByTiers * 0.20, 0.30, 1.0);
+  awayXG = awayXG * clamp(1 - awayIsWeakerByTiers * 0.20, 0.30, 1.0);
+
+  // Missing reduction cap scales down with tier advantage —
+  // a T3 team's replacements are still better than T6 opposition.
+  const homeMissingCap = clamp(0.20 - homeTierAdv * 0.04, 0.05, 0.20);
+  const awayMissingCap = clamp(0.20 - awayTierAdv * 0.04, 0.05, 0.20);
+  const homeMissingReduction = clamp(params.homeMissingGoals / (baseHome * 2), 0, homeMissingCap);
+  const awayMissingReduction = clamp(params.awayMissingGoals / (baseAway * 2), 0, awayMissingCap);
+
   homeXG = homeXG * (1 - homeMissingReduction);
   awayXG = awayXG * (1 - awayMissingReduction);
 
-  // Scoreline probabilities up to 6 goals per side
   const MAX_GOALS = 6;
   let p_over15 = 0, p_over25 = 0, p_over35 = 0, p_btts = 0;
   let p_under15 = 0, p_under25 = 0;
@@ -1282,10 +1295,11 @@ export async function GET(req: Request) {
       missingImpact: homeMissing.missingImpact,
     },
     away: {
-      ...away,
-      rating: awayRating,
-      missingLikelyXI: awayMissing.missing,
-      missingImpact: awayMissing.missingImpact,
-    },
+    ...away,
+    rating: awayRating,
+    missingLikelyXI: awayMissing.missing,
+    missingImpact: awayMissing.missingImpact,
+  },
+  model_version: "v2_tier_draw_soft_missing",
   });
 }
