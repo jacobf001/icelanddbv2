@@ -172,7 +172,7 @@ async function main() {
       .select("ksi_match_id, season_year, kickoff_at, home_team_ksi_id, away_team_ksi_id, home_score, away_score")
       .gte("season_year", fromYear)
       .lte("season_year", toYear)
-      .is("home_team_ksi_id", null)
+      .or("home_team_ksi_id.is.null,home_score.is.null")
       .order("kickoff_at", { ascending: false, nullsFirst: false })
       .range(from, from + pageSize - 1);
 

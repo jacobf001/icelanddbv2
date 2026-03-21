@@ -684,8 +684,8 @@ export async function GET(req: Request) {
     }
   }
 
-  const homeStrength = homeTeamId ? (strengthByTeam.get(homeTeamId) ?? 0.5) : 0.5;
-  const awayStrength = awayTeamId ? (strengthByTeam.get(awayTeamId) ?? 0.5) : 0.5;
+  const homeStrength = homeTeamId ? (strengthByTeam.get(homeTeamId) ?? 0.15) : 0.15;
+  const awayStrength = awayTeamId ? (strengthByTeam.get(awayTeamId) ?? 0.15) : 0.15;
 
   const homeTier = homeTeamId ? (tierByTeam.get(homeTeamId) ?? null) : null;
   const awayTier = awayTeamId ? (tierByTeam.get(awayTeamId) ?? null) : null;
@@ -1018,15 +1018,28 @@ export async function GET(req: Request) {
       const sideCeiling = isWomen
         ? (sideTier <= 1 ? 92 : sideTier <= 2 ? 78 : 22)
         : (sideTier <= 1 ? 92 : sideTier === 2 ? 78 : sideTier === 3 ? 64 : sideTier === 4 ? 50 : sideTier === 5 ? 36 : 28);
-      if (sideCeiling < importanceCeiling) {
-        importanceCeiling = sideCeiling;
+      // Only cap to side ceiling if the player hasn't played significant minutes at a higher tier.
+      // A player who regularly plays T3 but is listed for a T5 team should keep their T3 ceiling.
+      const playerHighestTier = [...(playerRows ?? [])].reduce((best: number, r: any) => {
+        const ctx = r.ksi_team_id ? clubCtxBySeasonTeam.get(`${seasonYear}-${String(r.ksi_team_id)}`) ?? null : null;
+        const t = Number.isFinite(Number(ctx?.competition_tier)) ? Number(ctx?.competition_tier) : 99;
+        const mins = Number(r.minutes ?? 0);
+        return mins >= 180 && t < best ? t : best;
+      }, 99);
+
+      const effectiveCeiling = playerHighestTier < (sideTier ?? 99)
+        ? importanceCeiling  // keep their own higher-tier ceiling
+        : sideCeiling;       // cap to side tier ceiling
+
+      if (effectiveCeiling < importanceCeiling) {
+        importanceCeiling = effectiveCeiling;
         const hasTeamStats = sideTeamId
           ? (playerRows ?? []).some((r: any) => String(r.ksi_team_id) === sideTeamId && Number(r.minutes ?? 0) > 0)
           : false;
-        if (!hasTeamStats && importance < Math.round(sideCeiling * 0.35)) {
-          importance = Math.round(sideCeiling * 0.35);
+        if (!hasTeamStats && importance < Math.round(effectiveCeiling * 0.35)) {
+          importance = Math.round(effectiveCeiling * 0.35);
         } else {
-          importance = Math.min(importance, sideCeiling);
+          importance = Math.min(importance, effectiveCeiling);
         }
       }
     }

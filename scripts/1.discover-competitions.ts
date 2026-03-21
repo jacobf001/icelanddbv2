@@ -20,9 +20,7 @@ import * as dotenv from "dotenv";
 dotenv.config({ path: path.resolve(process.cwd(), "../.env"), override: true });
 
 const CURRENT_YEAR = new Date().getFullYear();
-const SEASONS = ["2020", "2021", "2022", "2023", "2024", "2025", String(CURRENT_YEAR)].filter(
-  (v, i, a) => a.indexOf(v) === i
-);
+const SEASONS = [String(CURRENT_YEAR)];
 const PAGE_SIZE = "100";
 
 interface ScrapeTarget {

@@ -61,14 +61,18 @@ async function fetchMatchesInRange(fromYear: number, toYear: number) {
   const all: any[] = [];
 
   while (true) {
-    const { data, error } = await supabase
+    const q = supabase
       .from("matches")
       .select("ksi_match_id, season_year, home_team_ksi_id, away_team_ksi_id")
       .gte("season_year", fromYear)
       .lte("season_year", toYear)
-      .not("home_score", "is", null)  // ← add this
+      .not("home_score", "is", null)
       .order("kickoff_at", { ascending: false, nullsFirst: false })
       .range(from, from + pageSize - 1);
+
+    if (!replace) q.is("scraped_events_at", null);
+
+    const { data, error } = await q;
 
     if (error) throw new Error(error.message);
     const batch = data ?? [];
@@ -297,12 +301,16 @@ async function main() {
         if (replace) {
           const { error: delErr } = await supabase.from("match_events").delete().eq("ksi_match_id", mid);
           if (delErr) throw new Error(`match_events delete failed: ${delErr.message}`);
+          await supabase.from("matches").update({ scraped_events_at: null }).eq("ksi_match_id", mid);
         }
         if (events.length) {
           const payload = events.map((e) => pickAllowed(e, allowedCols));
           const { error: eErr } = await supabase.from("match_events").upsert(payload, { onConflict: "ksi_match_id,event_idx" });
           if (eErr) throw new Error(`match_events upsert failed: ${eErr.message}`);
         }
+        await supabase.from("matches")
+            .update({ scraped_events_at: new Date().toISOString() })
+            .eq("ksi_match_id", mid);
         console.log(`  ✅ saved events=${events.length}`);
       }
 
