@@ -249,7 +249,11 @@ function computeOdds(params: {
   const awayTier = Number.isFinite(Number(params.awayTier)) ? Number(params.awayTier) : 6;
 
   const rawStrengthDiff = clamp(params.homeRawStrength - params.awayRawStrength, -1, 1);
-  const strengthZ = rawStrengthDiff * 5.8;
+  // Same-tier matches: cap strength contribution — lineup quality is the differentiator.
+  // Cross-tier matches: strength gap matters more as it reflects structural difference.
+  const tierGapForStrength = Math.abs(homeTier - awayTier);
+  const strengthMultiplier = tierGapForStrength === 0 ? 1.5 : tierGapForStrength === 1 ? 4.0 : 6.5;
+  const strengthZ = rawStrengthDiff * strengthMultiplier;
 
   // Missing player impact — direct z-score adjustment.
   // Normalise against 4× tier ceiling (fully depleted squad = 1.0), scale to ±1.5 z.

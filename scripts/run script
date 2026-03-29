@@ -1,1 +1,9 @@
 npx ts-node run-weekly-update.ts --year 2026
+
+
+Git
+
+cd C:\Users\jacob\Desktop\icelanddbv2
+git add -A
+git commit -m "Edited lineup route"
+git push
