@@ -171,25 +171,26 @@ function sideRating(side: { starters: any[]; bench: any[] }, sideStrength: numbe
   const lineupGap = Math.max(0, histStrength - avgStarterImp);
   const lineupWeight = clamp01(0.40 + lineupGap * 0.60);
   const histWeight = 1 - lineupWeight;
-  const historyCap = clamp01(1 - missingRatio * 1.5);
+  const historyCap = clamp01(1 - missingRatio * 0.8);  // was 1.5
   const cappedHistStrength = histStrength * historyCap;
   const rawEffective = clamp01(cappedHistStrength * histWeight + avgStarterImp * lineupWeight);
   const tierFloor = histStrength * 0.40 * Math.min(1, avgStarterImp / Math.max(histStrength, 0.01));
   const rawEffectiveWithFloor = Math.max(rawEffective, tierFloor);
 
-  // Untracked squad penalty: if starters have near-zero importance scores,
-  // they are youth/unregistered players with no stats — treat as severely weakened.
-  // avgImpRatio of 0 = fully untracked, 1 = full strength tracked squad.
-  // At avgImpRatio=0 → 70% reduction. At avgImpRatio≥0.125 → no penalty.
-  const avgImpRatio = side.starters.length > 0 ? (starterSum / side.starters.length) / 100 : 0;
+  const avgCeiling = side.starters.length > 0
+    ? side.starters.reduce((s, p) => s + (p.importanceCeiling ?? 100), 0) / side.starters.length
+    : 100;
+  const avgImpRatio = side.starters.length > 0 ? (starterSum / side.starters.length) / avgCeiling : 0;
   const untrackedPenalty = clamp01(1 - avgImpRatio * 8);
   const effectiveStrength = rawEffectiveWithFloor * (1 - untrackedPenalty * 0.70);
 
   const raw = starterSum + benchSum * 0.35;
   const scaled = raw * (0.85 + 0.30 * effectiveStrength);
-
   const startersKnown = side.starters.filter((p) => p.season != null).length;
   const coverage = side.starters.length ? startersKnown / side.starters.length : 0;
+
+  const historicalFloor = sideStrength * 0.55;
+  const effectiveStrengthFloored = Math.max(effectiveStrength, historicalFloor);
 
   return {
     starters: Math.round(starterSum),
@@ -197,7 +198,7 @@ function sideRating(side: { starters: any[]; bench: any[] }, sideStrength: numbe
     raw: Math.round(raw),
     total: Math.round(scaled),
     coverage,
-    effectiveStrength,
+    effectiveStrength: effectiveStrengthFloored,
   };
 }
 
@@ -244,13 +245,19 @@ function computeOdds(params: {
   homeRawStrength: number; awayRawStrength: number;
   homeLineupTotal: number; awayLineupTotal: number;
   homeMissingImpact: number; awayMissingImpact: number;
+  homePosition: number | null;
+  awayPosition: number | null;
+  homePlayed: number;
 }) {
   const homeTier = Number.isFinite(Number(params.homeTier)) ? Number(params.homeTier) : 6;
   const awayTier = Number.isFinite(Number(params.awayTier)) ? Number(params.awayTier) : 6;
   const tierGapForStrength = Math.abs(homeTier - awayTier);
 
   const rawStrengthDiff = clamp(params.homeRawStrength - params.awayRawStrength, -1, 1);
-  const strengthMultiplier = tierGapForStrength === 0 ? 1.5 : tierGapForStrength === 1 ? 4.0 : 5.8;
+  const strengthMultiplier =
+    tierGapForStrength === 0 ? 3.5 :   // was 1.5
+    tierGapForStrength === 1 ? 4.0 :
+    5.8;
 
   function lineupBaseline(tier: number): number {
     if (tier <= 1) return 500;
@@ -281,8 +288,7 @@ function computeOdds(params: {
   const tierAdvRaw = clamp(
     (awayTier - homeTier) * 1.0 +
       Math.sign(awayTier - homeTier) * Math.max(0, Math.abs(awayTier - homeTier) - 1) * 0.5,
-    -4.0,
-    4.0
+    -4.0, 4.0
   );
   const effectiveStrengthRatio = clamp(
     params.awayRawStrength / Math.max(params.homeRawStrength, 0.01),
@@ -293,16 +299,23 @@ function computeOdds(params: {
     : 1.0;
   const tierAdv = tierAdvRaw * depletionFactor * tierAdvScale;
 
-  const avgTier = ((homeTier ?? 3) + (awayTier ?? 3)) / 2;
-  const homeAdv = clamp(0.40 - (avgTier - 1) * 0.10, 0.05, 0.40);
+  const avgTier = (homeTier + awayTier) / 2;
+  const tierGapAbs = Math.abs(homeTier - awayTier);
+  const homeAdvBase = clamp(0.40 - (avgTier - 1) * 0.10, 0.05, 0.40);
+  const homeAdv = homeAdvBase * clamp(1 - tierGapAbs * 0.25, 0.2, 1.0);
 
-  const z = strengthZ + lineupZ + missingAdj + tierAdv + homeAdv;
+  const posWeight = clamp01(params.homePlayed / 10);
+  const posGap = (params.awayPosition ?? 6) - (params.homePosition ?? 6);
+  const tierPosWeight = clamp(1 - (Math.min(homeTier, awayTier) - 1) * 0.2, 0.2, 1.0);
+  const posZ = clamp(posGap * 0.3, -2.0, 2.0) * posWeight * tierPosWeight;
+
+  const z = strengthZ + lineupZ + missingAdj + tierAdv + homeAdv + posZ;
 
   const pHomeRaw = sigmoid(z);
   const pAwayRaw = 1 - pHomeRaw;
 
   const gap = Math.abs(z);
-  const pDraw = clamp(0.26 - 0.07 * gap, 0.08, 0.28);
+  const pDraw = clamp(0.22 - 0.07 * gap, 0.07, 0.24);  // was 0.26/0.08/0.28
 
   const pHome = (1 - pDraw) * pHomeRaw;
   const pAway = (1 - pDraw) * pAwayRaw;
@@ -495,6 +508,22 @@ function blendStrength(current: number, prev: number, played: number, tier: numb
   const effectiveFloor = floor * Math.max(0, 1 - played / 8);
   const withFloor = Math.max(blended, effectiveFloor);
   return clamp01(Math.min(withFloor, ceiling));
+}
+
+function dominantPlayerTier(starters: any[]): number | null {
+  const tierCounts = new Map<number, number>();
+  for (const p of starters) {
+    const tier = p.season?.club_ctx?.competition_tier;
+    if (tier && tier < 90) {
+      tierCounts.set(tier, (tierCounts.get(tier) ?? 0) + (p.importance ?? 0));
+    }
+  }
+  let bestTier: number | null = null;
+  let bestScore = -1;
+  for (const [tier, score] of tierCounts.entries()) {
+    if (score > bestScore) { bestScore = score; bestTier = tier; }
+  }
+  return bestTier;
 }
 
 export async function GET(req: Request) {
@@ -1281,17 +1310,23 @@ export async function GET(req: Request) {
     women: isWomen,
   });
 
+  const homeEffectiveTier = dominantPlayerTier(home.starters) ?? homeTier;
+  const awayEffectiveTier = dominantPlayerTier(away.starters) ?? awayTier;
+
   const pricing = computeOdds({
     homeOverall,
     awayOverall,
-    homeTier,
-    awayTier,
+    homeTier: homeEffectiveTier,
+    awayTier: awayEffectiveTier,
     homeRawStrength: homeRating.effectiveStrength,
     awayRawStrength: awayRating.effectiveStrength,
     homeLineupTotal: homeRating.total,
     awayLineupTotal: awayRating.total,
     homeMissingImpact: homeMissing.missingImpact,
     awayMissingImpact: awayMissing.missingImpact,
+    homePosition: teamStrengthDebug.get(homeTeamId ?? "")?.position ?? null,
+    awayPosition: teamStrengthDebug.get(awayTeamId ?? "")?.position ?? null,
+    homePlayed: teamStrengthDebug.get(homeTeamId ?? "")?.played ?? 0,
   });
 
   // Goals per game lost from missing scorers — sum goals/maxGames for each missing player
