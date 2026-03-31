@@ -547,7 +547,7 @@ function MissingLikelyXI({
   function impactColor(imp: number, ceiling: number): string {
     const ratio = ceiling > 0 ? imp / ceiling : 0;
     if (ratio >= 0.80) return "text-emerald-400";
-    if (ratio >= 0.60) return "text-green-400";
+    if (ratio >= 0.60) return "text-sky-400";
     if (ratio >= 0.40) return "text-yellow-400";
     return "text-white/35";
   }
@@ -666,8 +666,8 @@ function PlayerAnalysisTable({ title, rows, accent }: { title: string; rows: any
                 const ceiling = p.importanceCeiling ?? 100;
                 const impRatio = ceiling > 0 ? imp / ceiling : 0;
                 // Colour by starts — reflects actual playing time, not abstract ceiling ratio
-                const impColor = imp < 30 ? "text-white/30" : impRatio >= 0.80 ? "text-emerald-400" : impRatio >= 0.60 ? "text-green-400" : impRatio >= 0.40 ? "text-yellow-400" : "text-white/70";
-                const rowHighlight = imp < 30 ? "" : impRatio >= 0.80 ? `border-l-2 border-l-emerald-500 bg-emerald-950/20` : impRatio >= 0.60 ? `border-l-2 border-l-green-500/40 bg-green-950/10` : impRatio >= 0.40 ? `border-l-2 border-l-yellow-500/50 bg-yellow-950/10` : "";
+                const impColor = imp === 0 ? "text-white/30" : impRatio >= 0.80 ? "text-emerald-400" : impRatio >= 0.60 ? "text-sky-400" : impRatio >= 0.40 ? "text-yellow-400" : "text-white/50";
+                const rowHighlight = imp === 0 ? "" : impRatio >= 0.80 ? `border-l-2 border-l-emerald-500 bg-emerald-950/20` : impRatio >= 0.60 ? `border-l-2 border-l-sky-500/40 bg-sky-950/10` : impRatio >= 0.40 ? `border-l-2 border-l-yellow-500/50 bg-yellow-950/10` : "";
 
                 return (
                   <React.Fragment key={p.ksi_player_id}>

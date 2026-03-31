@@ -247,34 +247,56 @@ function computeOdds(params: {
 }) {
   const homeTier = Number.isFinite(Number(params.homeTier)) ? Number(params.homeTier) : 6;
   const awayTier = Number.isFinite(Number(params.awayTier)) ? Number(params.awayTier) : 6;
+  const tierGapForStrength = Math.abs(homeTier - awayTier);
 
   const rawStrengthDiff = clamp(params.homeRawStrength - params.awayRawStrength, -1, 1);
-  // Same-tier matches: cap strength contribution — lineup quality is the differentiator.
-  // Cross-tier matches: strength gap matters more as it reflects structural difference.
-  const tierGapForStrength = Math.abs(homeTier - awayTier);
-  const strengthMultiplier = tierGapForStrength === 0 ? 1.5 : tierGapForStrength === 1 ? 4.0 : 6.5;
-  const strengthZ = rawStrengthDiff * strengthMultiplier;
+  const strengthMultiplier = tierGapForStrength === 0 ? 1.5 : tierGapForStrength === 1 ? 4.0 : 5.8;
 
-  // Missing player impact — direct z-score adjustment.
-  // Normalise against 4× tier ceiling (fully depleted squad = 1.0), scale to ±1.5 z.
-  // This is the single biggest situational factor — a team missing Key players
-  // should see a meaningful swing in win probability.
+  function lineupBaseline(tier: number): number {
+    if (tier <= 1) return 500;
+    if (tier === 2) return 380;
+    if (tier === 3) return 300;
+    if (tier === 4) return 220;
+    return 160;
+  }
+
+  const homeLineupRatio = clamp(params.homeLineupTotal / lineupBaseline(homeTier), 0, 1.5);
+  const awayLineupRatio = clamp(params.awayLineupTotal / lineupBaseline(awayTier), 0, 1.5);
+
+  const awayDepleted = awayTier < homeTier && awayLineupRatio < 0.6;
+  const homeDepleted = homeTier < awayTier && homeLineupRatio < 0.6;
+  const depletionFactor = (awayDepleted || homeDepleted) ? 0.5 : 1.0;
+
+  const strengthZ = rawStrengthDiff * strengthMultiplier * depletionFactor;
+  const lineupMultiplier = tierGapForStrength === 0 ? 2.5 : tierGapForStrength === 1 ? 1.8 : 1.2;
+  const lineupZ = (homeLineupRatio - awayLineupRatio) * lineupMultiplier;
+
   const MISSING_CEILINGS: Record<number, number> = { 1: 92, 2: 78, 3: 64, 4: 50, 5: 36 };
-  const homeMissingNorm = clamp(params.homeMissingImpact / ((MISSING_CEILINGS[homeTier] ?? 64) * 4), 0, 1);
-  const awayMissingNorm = clamp(params.awayMissingImpact / ((MISSING_CEILINGS[awayTier] ?? 64) * 4), 0, 1);
-  // Cap missing impact swing based on tier gap — missing players can't override structural tier advantage.
-  // A 3-tier gap means even a fully depleted T3 side should beat a full-strength T6 side.
-  const tierGap = Math.abs(homeTier - awayTier);
-  const missingCap = clamp(1.0 - tierGap * 0.25, 0.10, 1.0);
+  const homeMissingNorm = clamp(params.homeMissingImpact / ((MISSING_CEILINGS[homeTier] ?? 64) * 6), 0, 1);
+  const awayMissingNorm = clamp(params.awayMissingImpact / ((MISSING_CEILINGS[awayTier] ?? 64) * 6), 0, 1);
+
+  const missingCap = clamp(1.0 - tierGapForStrength * 0.25, 0.10, 1.0);
   const missingAdj = (awayMissingNorm - homeMissingNorm) * 0.9 * missingCap;
 
-  // Tier advantage scales non-linearly for large gaps
-  const tierAdv = clamp((awayTier - homeTier) * 1.0 + Math.sign(awayTier - homeTier) * Math.max(0, Math.abs(awayTier - homeTier) - 1) * 0.5, -4.0, 4.0);
+  const tierAdvRaw = clamp(
+    (awayTier - homeTier) * 1.0 +
+      Math.sign(awayTier - homeTier) * Math.max(0, Math.abs(awayTier - homeTier) - 1) * 0.5,
+    -4.0,
+    4.0
+  );
+  const effectiveStrengthRatio = clamp(
+    params.awayRawStrength / Math.max(params.homeRawStrength, 0.01),
+    0, 3.0
+  );
+  const tierAdvScale = effectiveStrengthRatio < 1.0
+    ? clamp(effectiveStrengthRatio, 0.1, 1.0)
+    : 1.0;
+  const tierAdv = tierAdvRaw * depletionFactor * tierAdvScale;
 
   const avgTier = ((homeTier ?? 3) + (awayTier ?? 3)) / 2;
   const homeAdv = clamp(0.40 - (avgTier - 1) * 0.10, 0.05, 0.40);
 
-  const z = strengthZ + missingAdj + tierAdv + homeAdv;
+  const z = strengthZ + lineupZ + missingAdj + tierAdv + homeAdv;
 
   const pHomeRaw = sigmoid(z);
   const pAwayRaw = 1 - pHomeRaw;
@@ -1273,19 +1295,53 @@ export async function GET(req: Request) {
   });
 
   // Goals per game lost from missing scorers — sum goals/maxGames for each missing player
-  function missingGoalsPerGame(missing: any[], tier: number | null): number {
+  function maxGamesForTierSimple(tier: number | null): number {
     const t = Number.isFinite(Number(tier)) ? Number(tier) : 3;
-    const maxG = t <= 3 ? 22 : t === 4 ? 18 : 14;
-    return missing.reduce((s, p) => s + (Number(p.goals ?? 0) / maxG), 0);
+    if (t <= 3) return 22;
+    if (t === 4) return 18;
+    if (t === 5) return 14;
+    return 14;
   }
+
+  function missingGoalsDebug(missing: any[], tier: number | null) {
+    const maxGames = maxGamesForTierSimple(tier);
+
+    const players = (missing ?? []).map((p) => {
+      const goals = Number(p.goals ?? 0);
+      const goalsPerGame = maxGames > 0 ? goals / maxGames : 0;
+      return {
+        ksi_player_id: p.ksi_player_id ?? null,
+        player_name: p.player_name ?? null,
+        goals,
+        importance: Number(p.importance ?? 0),
+        goalsPerGame: Math.round(goalsPerGame * 1000) / 1000,
+      };
+    });
+
+    const totalGoals = players.reduce((s, p) => s + p.goals, 0);
+    const totalGoalsPerGame = players.reduce((s, p) => s + p.goalsPerGame, 0);
+
+    return {
+      maxGames,
+      totalGoals,
+      totalGoalsPerGame: Math.round(totalGoalsPerGame * 1000) / 1000,
+      topMissingScorers: players
+        .slice()
+        .sort((a, b) => b.goals - a.goals || b.importance - a.importance)
+        .slice(0, 8),
+    };
+  }
+
+  const homeMissingGoalsDebug = missingGoalsDebug(homeMissing.missing, homeTier);
+  const awayMissingGoalsDebug = missingGoalsDebug(awayMissing.missing, awayTier);
 
   const goalsModel = computeGoals({
     homeTier,
     awayTier,
-    homeStrength: homeStrength,  // raw historical strength, not lineup-blended
-    awayStrength: awayStrength,  // same
-    homeMissingGoals: missingGoalsPerGame(homeMissing.missing, homeTier),
-    awayMissingGoals: missingGoalsPerGame(awayMissing.missing, awayTier),
+    homeStrength: homeStrength,
+    awayStrength: awayStrength,
+    homeMissingGoals: homeMissingGoalsDebug.totalGoalsPerGame,
+    awayMissingGoals: awayMissingGoalsDebug.totalGoalsPerGame,
     homeMissingImpact: homeMissing.missingImpact,
     awayMissingImpact: awayMissing.missingImpact,
   });
@@ -1318,5 +1374,30 @@ export async function GET(req: Request) {
     missingImpact: awayMissing.missingImpact,
   },
   model_version: "v2_tier_draw_soft_missing",
+
+    debug: {
+      oddsInputs: {
+        homeTier,
+        awayTier,
+        homeStrengthRaw: homeStrength,
+        awayStrengthRaw: awayStrength,
+        homeEffectiveStrength: homeRating.effectiveStrength,
+        awayEffectiveStrength: awayRating.effectiveStrength,
+        homeLineupTotal: homeRating.total,
+        awayLineupTotal: awayRating.total,
+        homeCoverage: homeRating.coverage,
+        awayCoverage: awayRating.coverage,
+        homeMissingImpact: homeMissing.missingImpact,
+        awayMissingImpact: awayMissing.missingImpact,
+        homeOverall,
+        awayOverall,
+        awayLawayLineupRatio: awayRating.total / (awayTier === 3 ? 300 : awayTier === 4 ? 220 : 160),
+        depletionTriggered: (awayRating.total / (awayTier === 3 ? 300 : awayTier === 4 ? 220 : 160)) < 0.6,
+      },
+      missingGoals: {
+        home: homeMissingGoalsDebug,
+        away: awayMissingGoalsDebug,
+      },
+    },
   });
 }
