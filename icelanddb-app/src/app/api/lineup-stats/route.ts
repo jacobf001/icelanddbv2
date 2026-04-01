@@ -159,6 +159,7 @@ function calcImportance(params: {
   return raw;
 }
 
+// replace the entire sideRating function with:
 function sideRating(side: { starters: any[]; bench: any[] }, sideStrength: number, missingImpact = 0) {
   const starterSum = side.starters.reduce((s, p) => s + Number(p.importance ?? 0), 0);
   const benchSum = side.bench.reduce((s, p) => s + Number(p.importance ?? 0), 0);
@@ -171,7 +172,7 @@ function sideRating(side: { starters: any[]; bench: any[] }, sideStrength: numbe
   const lineupGap = Math.max(0, histStrength - avgStarterImp);
   const lineupWeight = clamp01(0.40 + lineupGap * 0.60);
   const histWeight = 1 - lineupWeight;
-  const historyCap = clamp01(1 - missingRatio * 0.8);  // was 1.5
+  const historyCap = clamp01(1 - missingRatio * 0.8);
   const cappedHistStrength = histStrength * historyCap;
   const rawEffective = clamp01(cappedHistStrength * histWeight + avgStarterImp * lineupWeight);
   const tierFloor = histStrength * 0.40 * Math.min(1, avgStarterImp / Math.max(histStrength, 0.01));
@@ -182,7 +183,17 @@ function sideRating(side: { starters: any[]; bench: any[] }, sideStrength: numbe
     : 100;
   const avgImpRatio = side.starters.length > 0 ? (starterSum / side.starters.length) / avgCeiling : 0;
   const untrackedPenalty = clamp01(1 - avgImpRatio * 8);
-  const effectiveStrength = rawEffectiveWithFloor * (1 - untrackedPenalty * 0.70);
+
+  const topPlayerRatios = side.starters
+    .map(p => (p.importanceCeiling ?? 100) > 0 ? (p.importance ?? 0) / (p.importanceCeiling ?? 100) : 0)
+    .sort((a, b) => b - a)
+    .slice(0, 2);
+
+  const peakBonus = topPlayerRatios.length > 0
+    ? topPlayerRatios.reduce((s, r) => s + r, 0) / topPlayerRatios.length * 0.08
+    : 0;
+
+  const effectiveStrength = rawEffectiveWithFloor * (1 - untrackedPenalty * 0.70) + peakBonus;
 
   const raw = starterSum + benchSum * 0.35;
   const scaled = raw * (0.85 + 0.30 * effectiveStrength);
@@ -333,13 +344,23 @@ function computeOdds(params: {
 // Real Icelandic league goal averages from DB (home, away) by tier
 // Tier: [avg_home, avg_away]
 const TIER_GOAL_BASELINES: Record<number, [number, number]> = {
-  1: [1.87, 1.50],
-  2: [1.96, 1.60],
-  3: [2.28, 1.80],
-  4: [2.19, 1.81],
-  5: [2.76, 2.26],
-  6: [2.96, 2.36],
+  1: [1.90, 1.49],  // Besta deild karla (was 1.87, 1.50 — very close)
+  2: [1.94, 1.53],  // Lengjudeild karla (was 1.96, 1.60)
+  3: [2.20, 1.65],  // 2. deild karla (was 2.28, 1.80 — notable change)
+  4: [2.30, 1.80],  // 3. deild karla (was 2.19, 1.81 — almost identical)
+  5: [2.58, 2.16],  // 4. deild karla (was 2.76, 2.26)
+  6: [2.96, 2.36],  // 5. deild karla average (was 2.96, 2.36)
 };
+
+
+const TIER_GOAL_BASELINES_WOMEN: Record<number, [number, number]> = {
+  1: [2.48, 1.89],
+  2: [2.71, 2.12],
+  3: [3.10, 2.45],
+  4: [3.30, 2.60],  // estimated, no data
+  5: [3.50, 2.80],  // estimated, no data
+};
+
 
 function poissonPmf(lambda: number, k: number): number {
   // P(X=k) for Poisson(lambda)
@@ -358,12 +379,18 @@ function computeGoals(params: {
   awayMissingGoals: number;
   homeMissingImpact: number;
   awayMissingImpact: number;
+  women?: boolean;  // ADD
 }) {
+  const baselines = params.women ? TIER_GOAL_BASELINES_WOMEN : TIER_GOAL_BASELINES;
   const homeTier = Number.isFinite(Number(params.homeTier)) ? Number(params.homeTier) : 3;
   const awayTier = Number.isFinite(Number(params.awayTier)) ? Number(params.awayTier) : 3;
 
-  const homeBaseline = TIER_GOAL_BASELINES[homeTier] ?? TIER_GOAL_BASELINES[3];
-  const awayBaseline = TIER_GOAL_BASELINES[awayTier] ?? TIER_GOAL_BASELINES[3];
+  const homeBaseline = baselines[homeTier] ?? baselines[3];
+  const awayBaseline = baselines[awayTier] ?? baselines[3];
+  // rest stays the same — just replace the two TIER_GOAL_BASELINES[...] lookups below too:
+  const awayBaselineHome = (baselines[awayTier] ?? baselines[3])[0];
+  const homeBaselineAway = (baselines[homeTier] ?? baselines[3])[1];
+
   let baseHome = homeBaseline[0];
   let baseAway = awayBaseline[1];
 
@@ -375,11 +402,9 @@ function computeGoals(params: {
 
   // Blend away attack baseline toward their home rate as tier advantage increases.
   // Max blend at 3+ tier gap (75% toward home rate).
-  const awayBaselineHome = (TIER_GOAL_BASELINES[awayTier] ?? TIER_GOAL_BASELINES[3])[0];
   baseAway = baseAway + (awayBaselineHome - baseAway) * clamp(awayTierAdv * 0.25, 0, 0.75);
 
   // Blend home attack baseline toward their away rate if away team is stronger.
-  const homeBaselineAway = (TIER_GOAL_BASELINES[homeTier] ?? TIER_GOAL_BASELINES[3])[1];
   baseHome = baseHome + (homeBaselineAway - baseHome) * clamp(homeTierAdv * 0.25, 0, 0.75);
 
   // Strength modifier relative to own-tier average.
@@ -402,8 +427,13 @@ function computeGoals(params: {
 
   // Missing reduction cap scales down with tier advantage —
   // a T3 team's replacements are still better than T6 opposition.
-  const homeMissingCap = clamp(0.20 - homeTierAdv * 0.04, 0.05, 0.20);
-  const awayMissingCap = clamp(0.20 - awayTierAdv * 0.04, 0.05, 0.20);
+  const tierMissingScale = params.women 
+    ? clamp(1 - (homeTier + awayTier) / 2 * 0.15, 0.2, 0.6)  // women: much lower impact at T2+
+    : clamp(1 - (homeTier + awayTier) / 2 * 0.08, 0.4, 1.0);  // men: moderate reduction at higher tiers
+
+  const homeMissingCap = clamp((0.2 - homeTierAdv * 0.04) * tierMissingScale, 0.02, 0.2);
+  const awayMissingCap = clamp((0.2 - awayTierAdv * 0.04) * tierMissingScale, 0.02, 0.2);
+
   const homeMissingReduction = clamp(params.homeMissingGoals / (baseHome * 2), 0, homeMissingCap);
   const awayMissingReduction = clamp(params.awayMissingGoals / (baseAway * 2), 0, awayMissingCap);
 
@@ -1379,6 +1409,7 @@ export async function GET(req: Request) {
     awayMissingGoals: awayMissingGoalsDebug.totalGoalsPerGame,
     homeMissingImpact: homeMissing.missingImpact,
     awayMissingImpact: awayMissing.missingImpact,
+    women: isWomen
   });
 
   return NextResponse.json({
