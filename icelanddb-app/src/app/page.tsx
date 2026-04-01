@@ -407,19 +407,28 @@ export default function HomePage() {
   );
 }
 
-// ---------- VALUE HELPERS ----------
-
-// Convert decimal odds to implied probability (no margin removal)
-// ---------- MODEL CARD ----------
 function ModelCard({ analysis }: { analysis: any }) {
   const p = analysis.probabilities;
   const odds = analysis.odds;
   const goals = analysis.goals;
+  const [marketOdds, setMarketOdds] = useState({ home: "", draw: "", away: "" });
 
   const homeStrength = analysis.teamStrengthDebug?.home?.strength ?? analysis.teamStrength?.home ?? 0;
   const awayStrength = analysis.teamStrengthDebug?.away?.strength ?? analysis.teamStrength?.away ?? 0;
   const homeName = analysis.teams?.home?.team_name ?? "Home";
   const awayName = analysis.teams?.away?.team_name ?? "Away";
+
+  function calcEdge(marketOdd: string, modelProb: number) {
+    const mo = Number(marketOdd);
+    if (!mo || mo <= 1 || !modelProb) return null;
+    const fairOdd = 1 / modelProb;
+    const edge = (mo / fairOdd - 1) * 100;
+    return { fairOdd, edge, value: edge >= 8 };
+  }
+
+  const homeEdge = calcEdge(marketOdds.home, p?.home);
+  const drawEdge = calcEdge(marketOdds.draw, p?.draw);
+  const awayEdge = calcEdge(marketOdds.away, p?.away);
 
   return (
     <div className="rounded-2xl border border-white/8 bg-white/3 p-6">
@@ -428,7 +437,6 @@ function ModelCard({ analysis }: { analysis: any }) {
         <div className="text-xs font-mono text-white/30 uppercase tracking-wider">Model v1</div>
       </div>
 
-      {/* Split probability bar */}
       {p && (
         <div className="mb-6">
           <div className="flex justify-between text-sm mb-2">
@@ -444,7 +452,6 @@ function ModelCard({ analysis }: { analysis: any }) {
         </div>
       )}
 
-      {/* Match odds */}
       {odds && (
         <div className="flex items-center gap-4 pb-4 border-b border-white/5">
           <span className="text-xs text-white/30 font-mono uppercase tracking-wider">Match odds</span>
@@ -456,7 +463,40 @@ function ModelCard({ analysis }: { analysis: any }) {
         </div>
       )}
 
-      {/* Goals markets */}
+      {p && (
+        <div className="mt-4 pb-4 border-b border-white/5">
+          <div className="text-xs text-white/30 font-mono uppercase tracking-wider mb-3">Market odds</div>
+          <div className="flex gap-3">
+            {[
+              { label: "H", key: "home" as const, prob: p.home, edge: homeEdge, nameColor: "text-blue-300" },
+              { label: "D", key: "draw" as const, prob: p.draw, edge: drawEdge, nameColor: "text-white/50" },
+              { label: "A", key: "away" as const, prob: p.away, edge: awayEdge, nameColor: "text-orange-300" },
+            ].map(({ label, key, prob, edge, nameColor }) => (
+              <div key={key} className="flex-1">
+                <div className={`text-xs font-mono mb-1.5 ${nameColor}`}>
+                  {label} <span className="text-white/30">fair {(1 / prob).toFixed(2)}</span>
+                </div>
+                <input
+                  className="w-full rounded-lg border border-white/10 bg-black/60 px-2 py-1.5 text-sm font-mono focus:border-white/30 focus:outline-none"
+                  placeholder="2.10"
+                  value={marketOdds[key]}
+                  onChange={(e) => setMarketOdds(prev => ({ ...prev, [key]: e.target.value }))}
+                />
+                {edge && (
+                  <div className={clsx(
+                    "mt-1.5 text-xs font-mono font-semibold",
+                    edge.value ? "text-teal-400" : edge.edge > 0 ? "text-white/40" : "text-red-400/60"
+                  )}>
+                    {edge.edge >= 0 ? "+" : ""}{edge.edge.toFixed(1)}%
+                    {edge.value && <span className="ml-1">✓ VALUE</span>}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {goals && (
         <div className="mt-4 pb-4 border-b border-white/5">
           <div className="flex items-center justify-between mb-3">
@@ -477,16 +517,16 @@ function ModelCard({ analysis }: { analysis: any }) {
               { label: "BTTS Yes", prob: goals.markets.btts_yes.prob, odds: goals.markets.btts_yes.odds },
               { label: "BTTS No", prob: goals.markets.btts_no.prob, odds: goals.markets.btts_no.odds },
             ].map(({ label, prob, odds: mOdds }) => {
-              const pct = Math.round(prob * 100);
+              const pctNum = Math.round(prob * 100);
               const isFav = prob >= 0.55;
               const isLong = prob < 0.30;
-              const textColor = isFav ? "text-emerald-400" : isLong ? "text-white/40" : "text-white/70";
-              const bgColor = isFav ? "bg-emerald-950/30 border-emerald-500/15" : "bg-white/3 border-white/6";
+              const textColor = isFav ? "text-teal-400" : isLong ? "text-white/40" : "text-white/70";
+              const bgColor = isFav ? "bg-teal-950/30 border-teal-500/15" : "bg-white/3 border-white/6";
               return (
                 <div key={label} className={`rounded-lg border px-3 py-2 ${bgColor}`}>
                   <div className="text-xs text-white/35 font-mono mb-1">{label}</div>
                   <div className="flex items-baseline justify-between gap-1">
-                    <span className={`text-sm font-bold font-mono ${textColor}`}>{pct}%</span>
+                    <span className={`text-sm font-bold font-mono ${textColor}`}>{pctNum}%</span>
                     <span className="text-xs font-mono text-white/30">{mOdds?.toFixed(2)}</span>
                   </div>
                 </div>
@@ -496,7 +536,6 @@ function ModelCard({ analysis }: { analysis: any }) {
         </div>
       )}
 
-      {/* Team strength */}
       <div className="mt-4 grid grid-cols-2 gap-3">
         {([
           { name: homeName, strength: homeStrength, tier: analysis.teamStrengthDebug?.home?.competition_tier, color: "blue" as const },
@@ -764,7 +803,7 @@ function FormDots({ recent5 }: { recent5?: { lastNApps: number; lastNMinutes: nu
 
   const mins = recent5.lastNMinutes;
   const pct = Math.min(100, Math.round((mins / 450) * 100));
-  const color = pct >= 70 ? "bg-emerald-500" : pct >= 40 ? "bg-yellow-500" : "bg-white/20";
+  const color = pct >= 70 ? "bg-teal-500" : pct >= 40 ? "bg-yellow-500" : "bg-white/20";
 
   return (
     <div className="flex items-center gap-1.5 justify-end">
