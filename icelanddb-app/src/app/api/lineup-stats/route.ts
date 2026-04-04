@@ -135,28 +135,18 @@ function calcImportance(params: {
   yellows: number;
   reds: number;
   maxGames: number;
-  // FIX 2: pass ceiling so raw score is scaled tier-relatively from the start.
-  // This prevents every regular starter from hitting ceiling/ceiling regardless of tier.
-  // A full-season T5 starter scores ~35/36, a partial-season one scores ~20/36.
   importanceCeiling: number;
 }) {
   const maxMins = params.maxGames * 90;
-  const minutesN = clamp01(params.minutes / maxMins);
-  const startsN = clamp01(params.starts / params.maxGames);
-
+  const minutesN = clamp01(params.minutes / Math.max(1, maxMins));
+  const startsN = clamp01(params.starts / Math.max(1, params.maxGames));
   const goalsBoost = clamp01(params.goals / 12) * 0.15;
   const cardPenalty = clamp01(params.yellows * 0.02 + params.reds * 0.08);
 
-  const base = minutesN * 0.35 + startsN * 0.55 + goalsBoost - cardPenalty;
+  const base = minutesN * 0.35 + startsN * 0.60 + goalsBoost - cardPenalty;
+  const raw = Math.max(0, Math.round(base * 100));
 
-  // Scale by (ceiling / 92) so the natural range for each tier fills its ceiling.
-  // 92 is the T1 ceiling — the "full" benchmark.
-  // A T5 full-season regular: base≈0.90 → 90 * (36/92) ≈ 35, not 90 hard-capped to 36.
-  // A T5 half-season player: base≈0.50 → 50 * (36/92) ≈ 20, properly differentiated.
-  const tierScale = clamp01(params.importanceCeiling / 92);
-  const raw = Math.max(0, Math.round(base * 100 * tierScale));
-
-  return raw;
+  return Math.min(raw, params.importanceCeiling);
 }
 
 // replace the entire sideRating function with:
@@ -193,10 +183,10 @@ function sideRating(side: { starters: any[]; bench: any[] }, sideStrength: numbe
     ? topPlayerRatios.reduce((s, r) => s + r, 0) / topPlayerRatios.length * 0.08
     : 0;
 
-  const effectiveStrength = rawEffectiveWithFloor * (1 - untrackedPenalty * 0.70) + peakBonus;
+  const effectiveStrength = rawEffectiveWithFloor * (1 - untrackedPenalty * 0.45) + peakBonus;
 
   const raw = starterSum + benchSum * 0.35;
-  const scaled = raw * (0.85 + 0.30 * effectiveStrength);
+  const scaled = raw * (0.75 + 0.55 * effectiveStrength);
   const startersKnown = side.starters.filter((p) => p.season != null).length;
   const coverage = side.starters.length ? startersKnown / side.starters.length : 0;
 
@@ -259,6 +249,7 @@ function computeOdds(params: {
   homePosition: number | null;
   awayPosition: number | null;
   homePlayed: number;
+  awayPlayed: number;
 }) {
   const homeTier = Number.isFinite(Number(params.homeTier)) ? Number(params.homeTier) : 6;
   const awayTier = Number.isFinite(Number(params.awayTier)) ? Number(params.awayTier) : 6;
@@ -287,14 +278,16 @@ function computeOdds(params: {
 
   const strengthZ = rawStrengthDiff * strengthMultiplier * depletionFactor;
   const lineupMultiplier = tierGapForStrength === 0 ? 2.5 : tierGapForStrength === 1 ? 1.8 : 1.2;
-  const lineupZ = (homeLineupRatio - awayLineupRatio) * lineupMultiplier;
+  const lineupZRaw = (homeLineupRatio - awayLineupRatio) * lineupMultiplier;
+  const lineupZ = lineupZRaw * 0.80;
 
   const MISSING_CEILINGS: Record<number, number> = { 1: 92, 2: 78, 3: 64, 4: 50, 5: 36 };
   const homeMissingNorm = clamp(params.homeMissingImpact / ((MISSING_CEILINGS[homeTier] ?? 64) * 6), 0, 1);
   const awayMissingNorm = clamp(params.awayMissingImpact / ((MISSING_CEILINGS[awayTier] ?? 64) * 6), 0, 1);
 
   const missingCap = clamp(1.0 - tierGapForStrength * 0.25, 0.10, 1.0);
-  const missingAdj = (awayMissingNorm - homeMissingNorm) * 0.9 * missingCap;
+  const missingAdjRaw = clamp((awayMissingNorm - homeMissingNorm) * 2.2 * missingCap, -1.5, 1.5);
+  const missingAdj = missingAdjRaw * 0.85;
 
   const tierAdvRaw = clamp(
     (awayTier - homeTier) * 1.0 +
@@ -326,7 +319,7 @@ function computeOdds(params: {
   const pAwayRaw = 1 - pHomeRaw;
 
   const gap = Math.abs(z);
-  const pDraw = clamp(0.22 - 0.07 * gap, 0.07, 0.24);  // was 0.26/0.08/0.28
+  const pDraw = clamp(0.27 - 0.035 * gap, 0.16, 0.30);
 
   const pHome = (1 - pDraw) * pHomeRaw;
   const pAway = (1 - pDraw) * pAwayRaw;
@@ -1129,6 +1122,52 @@ export async function GET(req: Request) {
       }
     }
 
+    const currentSeniorRows = playerRows.filter((r: any) => {
+    const teamId = r.ksi_team_id ? String(r.ksi_team_id) : null;
+    const ctx = teamId ? clubCtxBySeasonTeam.get(`${seasonYear}-${teamId}`) ?? null : null;
+    const category = ctx?.competition_category ?? null;
+    const tier = Number.isFinite(Number(ctx?.competition_tier)) ? Number(ctx?.competition_tier) : 99;
+    const isYouthRow =
+      ctx === null
+        ? true
+        : category === "U-19" ||
+          category === "U-20" ||
+          category === "U-21" ||
+          category === "U-17" ||
+          (tier > 5 && category !== "Fullorðnir" && category !== "Adults");
+
+    return !isYouthRow && Number(r.minutes ?? 0) > 0;
+  });
+
+  const currentSeniorMinutes = currentSeniorRows.reduce(
+    (sum: number, r: any) => sum + Number(r.minutes ?? 0),
+    0
+  );
+
+  if (currentSeniorMinutes > 0 && currentSeniorMinutes < 700) {
+    const cap =
+      currentSeniorMinutes < 250 ? 32 :
+      currentSeniorMinutes < 450 ? 42 :
+      currentSeniorMinutes < 700 ? 55 :
+      999;
+
+    importance = Math.min(importance, Math.min(cap, importanceCeiling));
+  }
+
+  const hasCurrentSeasonEvidence = playerRows.some(
+    (r: any) =>
+      Number(r.season_year ?? seasonYear) === seasonYear &&
+      (
+        Number(r.minutes ?? 0) > 0 ||
+        Number(r.starts ?? 0) > 0 ||
+        Number(r.matches_played ?? 0) > 0
+      )
+  );
+
+  if (!hasCurrentSeasonEvidence) {
+    importance = Math.min(importance, 10);
+  }
+
     const prevSeasons = prevPlayerRows
       .sort((a: any, b: any) => Number(b.minutes ?? 0) - Number(a.minutes ?? 0))
       .map((pr: any) => {
@@ -1343,127 +1382,155 @@ export async function GET(req: Request) {
   const homeEffectiveTier = dominantPlayerTier(home.starters) ?? homeTier;
   const awayEffectiveTier = dominantPlayerTier(away.starters) ?? awayTier;
 
-  const pricing = computeOdds({
-    homeOverall,
-    awayOverall,
-    homeTier: homeEffectiveTier,
-    awayTier: awayEffectiveTier,
-    homeRawStrength: homeRating.effectiveStrength,
-    awayRawStrength: awayRating.effectiveStrength,
-    homeLineupTotal: homeRating.total,
-    awayLineupTotal: awayRating.total,
-    homeMissingImpact: homeMissing.missingImpact,
-    awayMissingImpact: awayMissing.missingImpact,
-    homePosition: teamStrengthDebug.get(homeTeamId ?? "")?.position ?? null,
-    awayPosition: teamStrengthDebug.get(awayTeamId ?? "")?.position ?? null,
-    homePlayed: teamStrengthDebug.get(homeTeamId ?? "")?.played ?? 0,
-  });
-
-  // Goals per game lost from missing scorers — sum goals/maxGames for each missing player
-  function maxGamesForTierSimple(tier: number | null): number {
-    const t = Number.isFinite(Number(tier)) ? Number(tier) : 3;
-    if (t <= 3) return 22;
-    if (t === 4) return 18;
-    if (t === 5) return 14;
-    return 14;
-  }
-
-  function missingGoalsDebug(missing: any[], tier: number | null) {
-    const maxGames = maxGamesForTierSimple(tier);
-
-    const players = (missing ?? []).map((p) => {
-      const goals = Number(p.goals ?? 0);
-      const goalsPerGame = maxGames > 0 ? goals / maxGames : 0;
-      return {
-        ksi_player_id: p.ksi_player_id ?? null,
-        player_name: p.player_name ?? null,
-        goals,
-        importance: Number(p.importance ?? 0),
-        goalsPerGame: Math.round(goalsPerGame * 1000) / 1000,
-      };
+    const pricing = computeOdds({
+      homeOverall,
+      awayOverall,
+      homeTier: homeEffectiveTier,
+      awayTier: awayEffectiveTier,
+      homeRawStrength: homeRating.effectiveStrength,
+      awayRawStrength: awayRating.effectiveStrength,
+      homeLineupTotal: homeRating.total,
+      awayLineupTotal: awayRating.total,
+      homeMissingImpact: homeMissing.missingImpact,
+      awayMissingImpact: awayMissing.missingImpact,
+      homePosition: teamStrengthDebug.get(homeTeamId ?? "")?.position ?? null,
+      awayPosition: teamStrengthDebug.get(awayTeamId ?? "")?.position ?? null,
+      homePlayed: teamStrengthDebug.get(homeTeamId ?? "")?.played ?? 0,
+      awayPlayed: teamStrengthDebug.get(awayTeamId ?? "")?.played ?? 0,
     });
 
-    const totalGoals = players.reduce((s, p) => s + p.goals, 0);
-    const totalGoalsPerGame = players.reduce((s, p) => s + p.goalsPerGame, 0);
+    function maxGamesForTierSimple(tier: number | null): number {
+      const t = Number.isFinite(Number(tier)) ? Number(tier) : 3;
+      if (t <= 3) return 22;
+      if (t === 4) return 18;
+      if (t === 5) return 14;
+      return 14;
+    }
 
-    return {
-      maxGames,
-      totalGoals,
-      totalGoalsPerGame: Math.round(totalGoalsPerGame * 1000) / 1000,
-      topMissingScorers: players
-        .slice()
-        .sort((a, b) => b.goals - a.goals || b.importance - a.importance)
-        .slice(0, 8),
-    };
-  }
+    function missingGoalsDebug(missing: any[], tier: number | null) {
+      const maxGames = maxGamesForTierSimple(tier);
 
-  const homeMissingGoalsDebug = missingGoalsDebug(homeMissing.missing, homeTier);
-  const awayMissingGoalsDebug = missingGoalsDebug(awayMissing.missing, awayTier);
+      const players = (missing ?? []).map((p) => {
+        const goals = Number(p.goals ?? 0);
+        const goalsPerGame = maxGames > 0 ? goals / maxGames : 0;
+        return {
+          ksi_player_id: p.ksi_player_id ?? null,
+          player_name: p.player_name ?? null,
+          goals,
+          importance: Number(p.importance ?? 0),
+          goalsPerGame: Math.round(goalsPerGame * 1000) / 1000,
+        };
+      });
 
-  const goalsModel = computeGoals({
-    homeTier,
-    awayTier,
-    homeStrength: homeStrength,
-    awayStrength: awayStrength,
-    homeMissingGoals: homeMissingGoalsDebug.totalGoalsPerGame,
-    awayMissingGoals: awayMissingGoalsDebug.totalGoalsPerGame,
-    homeMissingImpact: homeMissing.missingImpact,
-    awayMissingImpact: awayMissing.missingImpact,
-    women: isWomen
-  });
+      const totalGoals = players.reduce((s, p) => s + p.goals, 0);
+      const totalGoalsPerGame = players.reduce((s, p) => s + p.goalsPerGame, 0);
 
-  return NextResponse.json({
-    inputUrl,
-    season_year: seasonYear,
-    teams,
+      return {
+        maxGames,
+        totalGoals,
+        totalGoalsPerGame: Math.round(totalGoalsPerGame * 1000) / 1000,
+        topMissingScorers: players
+          .slice()
+          .sort((a, b) => b.goals - a.goals || b.importance - a.importance)
+          .slice(0, 8),
+      };
+    }
 
-    teamStrength: { home: homeRating.effectiveStrength, away: awayRating.effectiveStrength },
-    teamStrengthDebug: {
-      home: homeTeamId ? teamStrengthDebug.get(homeTeamId) ?? null : null,
-      away: awayTeamId ? teamStrengthDebug.get(awayTeamId) ?? null : null,
-    },
+    const homeMissingGoalsDebug = missingGoalsDebug(homeMissing.missing, homeTier);
+    const awayMissingGoalsDebug = missingGoalsDebug(awayMissing.missing, awayTier);
 
-    overall: { home: homeOverall, away: awayOverall },
-    ...pricing,
-    goals: goalsModel,
+    const goalsModel = computeGoals({
+      homeTier,
+      awayTier,
+      homeStrength,
+      awayStrength,
+      homeMissingGoals: homeMissingGoalsDebug.totalGoalsPerGame,
+      awayMissingGoals: awayMissingGoalsDebug.totalGoalsPerGame,
+      homeMissingImpact: homeMissing.missingImpact,
+      awayMissingImpact: awayMissing.missingImpact,
+      women: isWomen,
+    });
 
-    home: {
-      ...home,
-      rating: homeRating,
-      missingLikelyXI: homeMissing.missing,
-      missingImpact: homeMissing.missingImpact,
-    },
-    away: {
-    ...away,
-    rating: awayRating,
-    missingLikelyXI: awayMissing.missing,
-    missingImpact: awayMissing.missingImpact,
-  },
-  model_version: "v2_tier_draw_soft_missing",
+    function debugLineupBaseline(tier: number, women = false) {
+      if (women) {
+        if (tier <= 1) return 470;
+        if (tier === 2) return 380;
+        if (tier === 3) return 300;
+        if (tier === 4) return 220;
+        if (tier === 5) return 170;
+        return 140;
+      }
 
-    debug: {
-      oddsInputs: {
-        homeTier,
-        awayTier,
-        homeStrengthRaw: homeStrength,
-        awayStrengthRaw: awayStrength,
-        homeEffectiveStrength: homeRating.effectiveStrength,
-        awayEffectiveStrength: awayRating.effectiveStrength,
-        homeLineupTotal: homeRating.total,
-        awayLineupTotal: awayRating.total,
-        homeCoverage: homeRating.coverage,
-        awayCoverage: awayRating.coverage,
-        homeMissingImpact: homeMissing.missingImpact,
-        awayMissingImpact: awayMissing.missingImpact,
-        homeOverall,
-        awayOverall,
-        awayLawayLineupRatio: awayRating.total / (awayTier === 3 ? 300 : awayTier === 4 ? 220 : 160),
-        depletionTriggered: (awayRating.total / (awayTier === 3 ? 300 : awayTier === 4 ? 220 : 160)) < 0.6,
+      if (tier <= 1) return 500;
+      if (tier === 2) return 380;
+      if (tier === 3) return 300;
+      if (tier === 4) return 220;
+      return 160;
+    }
+
+    return NextResponse.json({
+      inputUrl,
+      season_year: seasonYear,
+      teams,
+
+      teamStrength: {
+        home: homeRating.effectiveStrength,
+        away: awayRating.effectiveStrength,
       },
-      missingGoals: {
-        home: homeMissingGoalsDebug,
-        away: awayMissingGoalsDebug,
+
+      teamStrengthDebug: {
+        home: homeTeamId ? teamStrengthDebug.get(homeTeamId) ?? null : null,
+        away: awayTeamId ? teamStrengthDebug.get(awayTeamId) ?? null : null,
       },
-    },
-  });
-}
+
+      overall: { home: homeOverall, away: awayOverall },
+      ...pricing,
+      goals: goalsModel,
+
+      home: {
+        ...home,
+        rating: homeRating,
+        missingLikelyXI: homeMissing.missing,
+        missingImpact: homeMissing.missingImpact,
+      },
+
+      away: {
+        ...away,
+        rating: awayRating,
+        missingLikelyXI: awayMissing.missing,
+        missingImpact: awayMissing.missingImpact,
+      },
+
+      model_version: "v3_iceland_importance_and_lineup_calibration",
+
+      debug: {
+        oddsInputs: {
+          homeTier,
+          awayTier,
+          homeStrengthRaw: homeStrength,
+          awayStrengthRaw: awayStrength,
+          homeEffectiveStrength: homeRating.effectiveStrength,
+          awayEffectiveStrength: awayRating.effectiveStrength,
+          homeLineupTotal: homeRating.total,
+          awayLineupTotal: awayRating.total,
+          homeCoverage: homeRating.coverage,
+          awayCoverage: awayRating.coverage,
+          homeMissingImpact: homeMissing.missingImpact,
+          awayMissingImpact: awayMissing.missingImpact,
+          homeOverall,
+          awayOverall,
+          homeLineupRatio:
+            homeRating.total / debugLineupBaseline(homeEffectiveTier ?? homeTier ?? 6, isWomen),
+          awayLineupRatio:
+            awayRating.total / debugLineupBaseline(awayEffectiveTier ?? awayTier ?? 6, isWomen),
+          depletionTriggered:
+            (awayRating.total / debugLineupBaseline(awayEffectiveTier ?? awayTier ?? 6, isWomen)) < 0.6,
+        },
+
+        missingGoals: {
+          home: homeMissingGoalsDebug,
+          away: awayMissingGoalsDebug,
+        },
+      },
+    });
+} 
