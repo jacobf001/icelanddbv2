@@ -173,6 +173,7 @@ async function main() {
       .gte("season_year", fromYear)
       .lte("season_year", toYear)
       .or("home_team_ksi_id.is.null,home_score.is.null")
+      .lte("kickoff_at", new Date().toISOString())
       .order("kickoff_at", { ascending: false, nullsFirst: false })
       .range(from, from + pageSize - 1);
 
