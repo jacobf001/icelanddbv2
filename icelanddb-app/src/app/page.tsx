@@ -1,27 +1,11 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
-import type { MatchPreviewResponse, TeamRow } from "@/lib/types";
+import React, { useState } from "react";
 
 const SEASONS = [2020, 2021, 2022, 2023, 2024, 2025];
 
 function clsx(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
-}
-
-function fmt(n: number | null | undefined) {
-  if (n === null || n === undefined) return "—";
-  return n.toLocaleString();
-}
-
-function pct(x: number | null | undefined) {
-  if (x === null || x === undefined) return "—";
-  return `${Math.round(x * 100)}%`;
-}
-
-function teamLabel(t: TeamRow) {
-  const nm = (t as any).team_name ?? (t as any).name;
-  return nm ? `${nm} (${t.ksi_team_id})` : `Team ${t.ksi_team_id}`;
 }
 
 function formatLeagueLine(row: any) {
@@ -86,30 +70,18 @@ function SideHeaderCard({
   );
 }
 
-type LineupPlayer = { ksi_player_id: string; name: string; shirt_no: number | null };
-type TeamLineup = { starters: LineupPlayer[]; bench: LineupPlayer[] };
-
 export default function HomePage() {
-  const [teams, setTeams] = useState<TeamRow[]>([]);
-  const [teamsLoading, setTeamsLoading] = useState(true);
-  const [teamsError, setTeamsError] = useState<string | null>(null);
 
   const [seasonYear, setSeasonYear] = useState<number>(2025);
-  const [homeTeamId, setHomeTeamId] = useState<string>("5980");
-  const [awayTeamId, setAwayTeamId] = useState<string>("5737");
-
-  const [matchLoading, setMatchLoading] = useState(false);
-  const [matchError, setMatchError] = useState<string | null>(null);
-  const [matchData, setMatchData] = useState<MatchPreviewResponse | null>(null);
-
   const [ksiUrl, setKsiUrl] = useState<string>("");
-
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<any | null>(null);
 
   // Market odds state — persists across re-analyses until user clears
 
+
+  const canRunLineup = Boolean(ksiUrl.trim().length > 0);
 
   async function runLineupAnalysis() {
     setAnalysisLoading(true);
@@ -132,65 +104,6 @@ export default function HomePage() {
     } finally {
       setAnalysisLoading(false);
     }
-  }
-
-  useEffect(() => {
-    let cancelled = false;
-    async function loadTeams() {
-      setTeamsLoading(true);
-      setTeamsError(null);
-      try {
-        const res = await fetch("/api/teams", { cache: "no-store" });
-        if (!res.ok) throw new Error(`Failed to load teams (${res.status})`);
-        const json = (await res.json()) as { teams: TeamRow[] };
-        if (!cancelled) setTeams(json.teams ?? []);
-      } catch (e: any) {
-        if (!cancelled) setTeamsError(e?.message ?? "Failed to load teams");
-      } finally {
-        if (!cancelled) setTeamsLoading(false);
-      }
-    }
-    loadTeams();
-    return () => { cancelled = true; };
-  }, []);
-
-  const teamMap = useMemo(() => {
-    const m = new Map<string, TeamRow>();
-    for (const t of teams) m.set(String(t.ksi_team_id), t);
-    return m;
-  }, [teams]);
-
-  const homeName = (teamMap.get(homeTeamId) as any)?.team_name ?? (teamMap.get(homeTeamId) as any)?.name ?? null;
-  const awayName = (teamMap.get(awayTeamId) as any)?.team_name ?? (teamMap.get(awayTeamId) as any)?.name ?? null;
-
-  const canRunMatch = Boolean(homeTeamId && awayTeamId && seasonYear && homeTeamId !== awayTeamId);
-  const canRunLineup = Boolean(ksiUrl.trim().length > 0);
-
-  async function runMatchPreview() {
-    if (!canRunMatch) return;
-    setMatchLoading(true);
-    setMatchError(null);
-    setMatchData(null);
-    try {
-      const qs = new URLSearchParams({
-        homeTeam: homeTeamId,
-        awayTeam: awayTeamId,
-        season: String(seasonYear),
-      });
-      const res = await fetch(`/api/match-preview?${qs.toString()}`, { cache: "no-store" });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json?.error ?? `Request failed (${res.status})`);
-      setMatchData(json as MatchPreviewResponse);
-    } catch (e: any) {
-      setMatchError(e?.message ?? "Failed to fetch match preview");
-    } finally {
-      setMatchLoading(false);
-    }
-  }
-
-  function swapTeams() {
-    setHomeTeamId(awayTeamId);
-    setAwayTeamId(homeTeamId);
   }
 
   return (
@@ -269,9 +182,16 @@ export default function HomePage() {
             </div>
 
             {/* Model / Prediction */}
+            {/* Model / Prediction */}
+            <H2HCard
+              h2h={analysis.h2h}
+              homeTeamId={analysis.teams?.home?.ksi_team_id ?? null}
+              awayTeamId={analysis.teams?.away?.ksi_team_id ?? null}
+              homeName={analysis.teams?.home?.team_name ?? "Home"}
+              awayName={analysis.teams?.away?.team_name ?? "Away"}
+            />
             <ModelCard
               analysis={analysis}
-
             />
 
             {/* Missing XI */}
@@ -319,89 +239,6 @@ export default function HomePage() {
             </div>
           </div>
         )}
-
-        {/* SEASON-TO-DATE PREVIEW */}
-        <section className="rounded-2xl border border-white/8 bg-white/3 p-6">
-          <h2 className="text-base font-semibold text-white/90">Season-to-date Preview</h2>
-          <p className="mt-1 text-sm text-white/40">Pick two teams and a season to compare stats, likely XI, and form.</p>
-
-          <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-12 md:items-end">
-            <div className="md:col-span-2">
-              <label className="mb-1.5 block text-xs text-white/50 font-mono uppercase tracking-wider">Season</label>
-              <select
-                className="w-full rounded-lg border border-white/10 bg-black/60 px-3 py-2.5 text-sm focus:border-white/30 focus:outline-none"
-                value={seasonYear}
-                onChange={(e) => setSeasonYear(Number(e.target.value))}
-              >
-                {SEASONS.map((y) => <option key={y} value={y}>{y}</option>)}
-              </select>
-            </div>
-
-            <div className="md:col-span-4">
-              <label className="mb-1.5 block text-xs text-white/50 font-mono uppercase tracking-wider">Home team</label>
-              <select
-                className="w-full rounded-lg border border-white/10 bg-black/60 px-3 py-2.5 text-sm focus:border-white/30 focus:outline-none"
-                value={homeTeamId}
-                onChange={(e) => setHomeTeamId(e.target.value)}
-                disabled={teamsLoading || Boolean(teamsError)}
-              >
-                {teams.map((t) => <option key={t.ksi_team_id} value={t.ksi_team_id}>{teamLabel(t)}</option>)}
-              </select>
-            </div>
-
-            <div className="md:col-span-1 flex md:justify-center pt-5">
-              <button
-                type="button"
-                onClick={swapTeams}
-                className="rounded-lg border border-white/10 bg-black/60 px-3 py-2.5 text-sm hover:bg-white/10 transition-colors"
-                title="Swap teams"
-              >⇄</button>
-            </div>
-
-            <div className="md:col-span-4">
-              <label className="mb-1.5 block text-xs text-white/50 font-mono uppercase tracking-wider">Away team</label>
-              <select
-                className="w-full rounded-lg border border-white/10 bg-black/60 px-3 py-2.5 text-sm focus:border-white/30 focus:outline-none"
-                value={awayTeamId}
-                onChange={(e) => setAwayTeamId(e.target.value)}
-                disabled={teamsLoading || Boolean(teamsError)}
-              >
-                {teams.map((t) => <option key={t.ksi_team_id} value={t.ksi_team_id}>{teamLabel(t)}</option>)}
-              </select>
-            </div>
-
-            <div className="md:col-span-1 flex md:justify-end pt-5">
-              <button
-                type="button"
-                onClick={runMatchPreview}
-                disabled={!canRunMatch || matchLoading || teamsLoading}
-                className={clsx(
-                  "w-full rounded-lg px-4 py-2.5 text-sm font-semibold transition-all",
-                  !canRunMatch || matchLoading || teamsLoading
-                    ? "bg-white/8 text-white/30 cursor-not-allowed"
-                    : "bg-white text-black hover:bg-white/90 active:scale-95",
-                )}
-              >
-                {matchLoading ? "…" : "Go"}
-              </button>
-            </div>
-          </div>
-
-          {!teamsLoading && !teamsError && (
-            <div className="mt-3 text-sm text-white/40 font-mono">
-              {homeName ?? `Team ${homeTeamId}`} vs {awayName ?? `Team ${awayTeamId}`} · {seasonYear}
-            </div>
-          )}
-          {teamsError && <div className="mt-3 text-sm text-red-400">{teamsError}</div>}
-          {matchError && <div className="mt-3 text-sm text-red-400">{matchError}</div>}
-
-          {matchData && (
-            <div className="mt-6 grid grid-cols-1 gap-6 md:grid-cols-2">
-              <TeamPanel title="Home" teamId={matchData.home_team_ksi_id} season={matchData.season_year} block={matchData.home} />
-              <TeamPanel title="Away" teamId={matchData.away_team_ksi_id} season={matchData.season_year} block={matchData.away} />
-            </div>
-          )}
-        </section>
       </div>
     </main>
   );
@@ -663,7 +500,6 @@ function PlayerAnalysisTable({ title, rows, accent }: { title: string; rows: any
     });
   }
 
-  const accentBorder = accent === "blue" ? "border-l-blue-500" : "border-l-orange-500";
   const starters = rows.filter((p) => !p.squad || p.squad === "xi");
   const age = avgAge(starters.length > 0 ? starters : rows);
 
@@ -764,18 +600,18 @@ function PlayerAnalysisTable({ title, rows, accent }: { title: string; rows: any
                           )}
                           {p.seasons?.length > 0
                             ? p.seasons.map((s: any, i: number) => (
-                                <div key={i} className="flex gap-1">
-                                  <span className="text-white/30 w-8 shrink-0">2025</span>
-                                  <span>{s.team_name ?? "—"}{s.club_ctx?.competition_tier ? ` · Tier ${s.club_ctx.competition_tier}` : ""}{s.club_ctx?.position ? ` · Pos ${s.club_ctx.position}` : ""}{s.minutes ? ` (${s.minutes}m)` : ""}</span>
+                                <div key={i} className="flex gap-1 items-center">
+                                  <span className="text-white/30 w-8 shrink-0">{s.season_year}</span>
+                                  <span className="flex-1">{s.team_name ?? "—"}{s.club_ctx?.competition_tier ? ` · Tier ${s.club_ctx.competition_tier}` : ""}{s.club_ctx?.position ? ` · Pos ${s.club_ctx.position}` : ""}{s.minutes ? ` (${s.minutes}m` : ""}{s.goals > 0 ? ` ⚽${s.goals}` : ""}{s.minutes ? `)` : ""}</span>
                                 </div>
                               ))
                             : <div className="flex gap-1"><span className="text-white/30 w-8">2025</span><span>—</span></div>
                           }
                           {p.prevSeasons?.length > 0
                             ? p.prevSeasons.map((ps: any, i: number) => (
-                                <div key={i} className="flex gap-1">
+                                <div key={i} className="flex gap-1 items-center">
                                   <span className="text-white/30 w-8 shrink-0">2024</span>
-                                  <span>{ps.team_name ?? "—"}{ps.club_ctx?.competition_tier ? ` · Tier ${ps.club_ctx.competition_tier}` : ""}{ps.club_ctx?.position ? ` · Pos ${ps.club_ctx.position}` : ""}{ps.minutes ? ` (${ps.minutes}m)` : ""}</span>
+                                  <span className="flex-1">{ps.team_name ?? "—"}{ps.club_ctx?.competition_tier ? ` · Tier ${ps.club_ctx.competition_tier}` : ""}{ps.club_ctx?.position ? ` · Pos ${ps.club_ctx.position}` : ""}{ps.minutes ? ` (${ps.minutes}m` : ""}{ps.goals > 0 ? ` ⚽${ps.goals}` : ""}{ps.minutes ? `)` : ""}</span>
                                 </div>
                               ))
                             : <div className="flex gap-1"><span className="text-white/30 w-8">2024</span><span>—</span></div>
@@ -795,6 +631,53 @@ function PlayerAnalysisTable({ title, rows, accent }: { title: string; rows: any
   );
 }
 
+function H2HCard({ h2h, homeTeamId, awayTeamId, homeName, awayName }: {
+  h2h: any;
+  homeTeamId: string | null;
+  awayTeamId: string | null;
+  homeName: string;
+  awayName: string;
+}) {
+  if (!h2h || !h2h.played) return null;
+  return (
+    <div className="rounded-2xl border border-white/8 bg-white/3 p-6">
+      <h3 className="text-base font-semibold mb-4">Head to Head</h3>
+      <div className="flex items-center justify-between mb-5">
+        <div className="text-center">
+          <div className="text-2xl font-bold text-blue-400">{h2h.homeWins}</div>
+          <div className="text-xs text-white/40 font-mono mt-1">{homeName}</div>
+        </div>
+        <div className="text-center">
+          <div className="text-2xl font-bold text-white/40">{h2h.draws}</div>
+          <div className="text-xs text-white/40 font-mono mt-1">Draws</div>
+        </div>
+        <div className="text-center">
+          <div className="text-2xl font-bold text-orange-400">{h2h.awayWins}</div>
+          <div className="text-xs text-white/40 font-mono mt-1">{awayName}</div>
+        </div>
+      </div>
+      <div className="space-y-2">
+        {h2h.recent.map((m: any) => {
+          const mHomeId = String(m.home_team_ksi_id);
+          const mAwayId = String(m.away_team_ksi_id);
+          const mHomeName = mHomeId === homeTeamId ? homeName : awayName;
+          const mAwayName = mAwayId === awayTeamId ? awayName : homeName;
+          const isHomeWin = m.home_score > m.away_score;
+          const isAwayWin = m.away_score > m.home_score;
+          const date = m.kickoff_at ? new Date(m.kickoff_at).toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "2-digit" }) : "—";
+          return (
+            <div key={m.ksi_match_id} className="flex items-center justify-between px-3 py-2 rounded-lg bg-white/3 text-sm">
+              <span className="text-white/40 font-mono text-xs w-16">{date}</span>
+              <span className={clsx("flex-1 text-right text-xs truncate", isHomeWin ? "text-white/80 font-semibold" : "text-white/40")}>{mHomeName}</span>
+              <span className="mx-3 font-mono font-bold text-white/80">{m.home_score} - {m.away_score}</span>
+              <span className={clsx("flex-1 text-left text-xs truncate", isAwayWin ? "text-white/80 font-semibold" : "text-white/40")}>{mAwayName}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 // ---------- FORM DOTS ----------
 function FormDots({ recent5 }: { recent5?: { lastNApps: number; lastNMinutes: number; lastNStarts: number } | null }) {
   if (!recent5 || recent5.lastNApps === 0) {
@@ -812,65 +695,5 @@ function FormDots({ recent5 }: { recent5?: { lastNApps: number; lastNMinutes: nu
       </div>
       <span className="text-xs font-mono text-white/40 w-8 text-right">{mins}</span>
     </div>
-  );
-}
-
-// ---------- TEAM PANEL (season preview) ----------
-function TeamPanel({
-  title,
-  teamId,
-  season,
-  block,
-}: {
-  title: "Home" | "Away";
-  teamId: string;
-  season: number;
-  block: MatchPreviewResponse["home"];
-}) {
-  const summary = block.summary;
-  const isHome = title === "Home";
-
-  return (
-    <section className={clsx(
-      "rounded-2xl border p-5",
-      isHome ? "border-blue-500/15 bg-blue-950/10" : "border-orange-500/15 bg-orange-950/10"
-    )}>
-      <h3 className="text-base font-semibold">{summary?.team_name ?? `Team ${teamId}`}</h3>
-      <div className="text-xs text-white/30 font-mono mt-0.5">Season {season}</div>
-
-      <div className="mt-4 grid grid-cols-4 gap-2">
-        {[
-          { label: "MP", value: fmt(summary?.matches_played) },
-          { label: "W/D/L", value: summary ? `${summary.wins}/${summary.draws}/${summary.losses}` : "—" },
-          { label: "Pts", value: fmt(summary?.points) },
-          { label: "GD", value: fmt(summary?.goal_diff) },
-        ].map(({ label, value }) => (
-          <div key={label} className="rounded-lg bg-black/30 px-2 py-2 text-center border border-white/5">
-            <div className="text-xs text-white/30 font-mono">{label}</div>
-            <div className="text-sm font-bold mt-0.5">{value}</div>
-          </div>
-        ))}
-      </div>
-
-      <div className="mt-5">
-        <h4 className="text-xs font-mono text-white/40 uppercase tracking-wider mb-2">Likely XI</h4>
-        <div className="space-y-0.5">
-          {block.likelyXI.length === 0 ? (
-            <div className="text-sm text-white/30 py-2">No data</div>
-          ) : (
-            block.likelyXI.slice(0, 11).map((p) => (
-              <div key={p.ksi_player_id} className="flex items-center justify-between py-1.5 px-2 rounded-lg hover:bg-white/3 transition-colors">
-                <span className="text-sm text-white/80">{p.player_name ?? `Player ${p.ksi_player_id}`}</span>
-                <div className="flex items-center gap-3 text-xs font-mono text-white/30">
-                  <span>{fmt(p.starts)} gs</span>
-                  <span>{fmt(p.minutes)} m</span>
-                  {Number(p.goals) > 0 && <span className="text-yellow-400">{p.goals}g</span>}
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-      </div>
-    </section>
   );
 }

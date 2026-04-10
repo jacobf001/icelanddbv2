@@ -276,7 +276,8 @@ function computeOdds(params: {
   const homeDepleted = homeTier < awayTier && homeLineupRatio < 0.6;
   const depletionFactor = (awayDepleted || homeDepleted) ? 0.5 : 1.0;
 
-  const strengthZ = rawStrengthDiff * strengthMultiplier * depletionFactor;
+  const tierGapDampener = clamp(1 - tierGapForStrength * 0.6, 0.1, 1.0);
+  const strengthZ = rawStrengthDiff * strengthMultiplier * depletionFactor * tierGapDampener;
   const lineupMultiplier = tierGapForStrength === 0 ? 2.5 : tierGapForStrength === 1 ? 1.8 : 1.2;
   const lineupZRaw = (homeLineupRatio - awayLineupRatio) * lineupMultiplier;
   const lineupZ = lineupZRaw * 0.80;
@@ -299,7 +300,7 @@ function computeOdds(params: {
     0, 3.0
   );
   const tierAdvScale = effectiveStrengthRatio < 1.0
-    ? clamp(effectiveStrengthRatio, 0.1, 1.0)
+    ? clamp(effectiveStrengthRatio, 0.7, 1.0)
     : 1.0;
   const tierAdv = tierAdvRaw * depletionFactor * tierAdvScale;
 
@@ -311,7 +312,7 @@ function computeOdds(params: {
   const posWeight = clamp01(params.homePlayed / 10);
   const posGap = (params.awayPosition ?? 6) - (params.homePosition ?? 6);
   const tierPosWeight = clamp(1 - (Math.min(homeTier, awayTier) - 1) * 0.2, 0.2, 1.0);
-  const posZ = clamp(posGap * 0.3, -2.0, 2.0) * posWeight * tierPosWeight;
+  const posZ = tierGapAbs > 0 ? 0 : clamp(posGap * 0.3, -2.0, 2.0) * posWeight * tierPosWeight;
 
   const z = strengthZ + lineupZ + missingAdj + tierAdv + homeAdv + posZ;
 
@@ -319,7 +320,8 @@ function computeOdds(params: {
   const pAwayRaw = 1 - pHomeRaw;
 
   const gap = Math.abs(z);
-  const pDraw = clamp(0.27 - 0.035 * gap, 0.16, 0.30);
+  const tierGapDrawReduction = tierGapAbs * 0.03;
+  const pDraw = clamp(0.27 - 0.035 * gap - tierGapDrawReduction, 0.12, 0.30);
 
   const pHome = (1 - pDraw) * pHomeRaw;
   const pAway = (1 - pDraw) * pAwayRaw;
@@ -337,21 +339,19 @@ function computeOdds(params: {
 // Real Icelandic league goal averages from DB (home, away) by tier
 // Tier: [avg_home, avg_away]
 const TIER_GOAL_BASELINES: Record<number, [number, number]> = {
-  1: [1.90, 1.49],  // Besta deild karla (was 1.87, 1.50 — very close)
-  2: [1.94, 1.53],  // Lengjudeild karla (was 1.96, 1.60)
-  3: [2.20, 1.65],  // 2. deild karla (was 2.28, 1.80 — notable change)
-  4: [2.30, 1.80],  // 3. deild karla (was 2.19, 1.81 — almost identical)
-  5: [2.58, 2.16],  // 4. deild karla (was 2.76, 2.26)
-  6: [2.96, 2.36],  // 5. deild karla average (was 2.96, 2.36)
+  1: [1.93, 1.53],  // Besta deild karla (648 matches)
+  2: [1.93, 1.53],  // 1. deild (543 matches)
+  3: [1.99, 1.55],  // 2. deild (528 matches)
+  4: [2.19, 1.80],  // 3. deild (528 matches)
+  5: [2.75, 2.26],  // 4. deild (660 matches)
+  6: [2.88, 2.31],  // 5. deild (1698 matches)
 };
 
-
 const TIER_GOAL_BASELINES_WOMEN: Record<number, [number, number]> = {
-  1: [2.48, 1.89],
-  2: [2.71, 2.12],
-  3: [3.10, 2.45],
-  4: [3.30, 2.60],  // estimated, no data
-  5: [3.50, 2.80],  // estimated, no data
+  1: [1.80, 1.50],  // Besta deild kvenna (423 matches)
+  2: [1.99, 1.71],  // Lengjudeild kvenna (360 matches)
+  3: [2.62, 2.12],  // 2. deild kvenna (425 matches)
+  6: [2.82, 2.28],  // 3. deild kvenna (891 matches)
 };
 
 
@@ -856,9 +856,10 @@ export async function GET(req: Request) {
   const kickoffMap = new Map<string, number>();
   if (matchIds.length) {
     const { data: matchRows, error: matchErr } = await supabaseAdmin
-      .from("matches")
-      .select("ksi_match_id, kickoff_at")
-      .in("ksi_match_id", matchIds);
+        .from("matches")
+        .select("ksi_match_id, kickoff_at")
+        .in("ksi_match_id", matchIds)
+        .gte("kickoff_at", `${seasonYear - 1}-01-01`);
 
     if (matchErr) return NextResponse.json({ error: matchErr.message }, { status: 500 });
 
@@ -1439,6 +1440,31 @@ export async function GET(req: Request) {
     const homeMissingGoalsDebug = missingGoalsDebug(homeMissing.missing, homeTier);
     const awayMissingGoalsDebug = missingGoalsDebug(awayMissing.missing, awayTier);
 
+    // H2H from DB
+    let h2h = null;
+    if (homeTeamId && awayTeamId) {
+      const { data: h2hRows } = await supabaseAdmin
+        .from("matches")
+        .select("ksi_match_id, kickoff_at, home_team_ksi_id, away_team_ksi_id, home_score, away_score")
+        .or(`and(home_team_ksi_id.eq.${homeTeamId},away_team_ksi_id.eq.${awayTeamId}),and(home_team_ksi_id.eq.${awayTeamId},away_team_ksi_id.eq.${homeTeamId})`)
+        .not("home_score", "is", null)
+        .order("kickoff_at", { ascending: false })
+        .limit(10);
+
+      if (h2hRows?.length) {
+        const homeWins = h2hRows.filter(r =>
+          (String(r.home_team_ksi_id) === homeTeamId && r.home_score > r.away_score) ||
+          (String(r.away_team_ksi_id) === homeTeamId && r.away_score > r.home_score)
+        ).length;
+        const awayWins = h2hRows.filter(r =>
+          (String(r.home_team_ksi_id) === awayTeamId && r.home_score > r.away_score) ||
+          (String(r.away_team_ksi_id) === awayTeamId && r.away_score > r.home_score)
+        ).length;
+        const draws = h2hRows.filter(r => r.home_score === r.away_score).length;
+        h2h = { played: h2hRows.length, homeWins, draws, awayWins, recent: h2hRows };
+      }
+    }
+
     const goalsModel = computeGoals({
       homeTier,
       awayTier,
@@ -1500,7 +1526,7 @@ export async function GET(req: Request) {
         missingLikelyXI: awayMissing.missing,
         missingImpact: awayMissing.missingImpact,
       },
-
+      h2h,
       model_version: "v3_iceland_importance_and_lineup_calibration",
 
       debug: {
