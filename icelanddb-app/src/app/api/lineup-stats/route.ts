@@ -558,6 +558,7 @@ function dominantPlayerTier(starters: any[]): number | null {
 }
 
 export async function GET(req: Request) {
+  try {
   const { searchParams } = new URL(req.url);
 
   const inputUrl = searchParams.get("url");
@@ -1577,4 +1578,7 @@ export async function GET(req: Request) {
         },
       },
     });
-} 
+  } catch (e: any) {
+    return NextResponse.json({ error: e?.message ?? "Internal error" }, { status: 500 });
+  }
+}
