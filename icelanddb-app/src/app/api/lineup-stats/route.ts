@@ -572,7 +572,7 @@ export async function GET(req: Request) {
   // 1) Parse lineups
   const origin = new URL(req.url).origin;
   const lineupRes = await fetch(
-    `${origin}/api/lineups-from-report?` + new URLSearchParams({ url: inputUrl }).toString(),
+    `https://icelanddbv2.vercel.app/api/lineups-from-report?` + new URLSearchParams({ url: inputUrl }).toString(),
     { cache: "no-store" },
   );
 
