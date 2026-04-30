@@ -2,7 +2,7 @@
 
 import React, { useState } from "react";
 
-const SEASONS = [2020, 2021, 2022, 2023, 2024, 2025];
+const SEASONS = [2024, 2025, 2026];
 
 function clsx(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");

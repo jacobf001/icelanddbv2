@@ -128,6 +128,14 @@ function tierQualityN(tier: number | null | undefined, women = false) {
   return 0.25;
 }
 
+const TEAM_HISTORY_MAP: Record<string, string> = {
+  "7415": "5475", // Stjarnan/KFG/Álftanes U19 Karlar
+};
+
+function resolveTeamId(id: string): string {
+  return TEAM_HISTORY_MAP[id] ?? id;
+}
+
 function calcImportance(params: {
   minutes: number;
   starts: number;
@@ -652,8 +660,8 @@ export async function GET(req: Request) {
   const statTeamIds = seasonTeamIds;
 
   // 3) Team strength + team names in one Promise.all — eliminates a sequential round-trip
-  const homeTeamId = teams.home.ksi_team_id;
-  const awayTeamId = teams.away.ksi_team_id;
+  const homeTeamId = teams.home.ksi_team_id ? resolveTeamId(teams.home.ksi_team_id) : null;
+  const awayTeamId = teams.away.ksi_team_id ? resolveTeamId(teams.away.ksi_team_id) : null;
 
   const teamIdsToLoad = Array.from(new Set([homeTeamId, awayTeamId, ...statTeamIds].filter(Boolean))) as string[];
 
@@ -709,7 +717,13 @@ export async function GET(req: Request) {
       if (t === 5) return 8;
       return 12;
     }
-
+    
+    // No current season data yet (start of season) — promote prev as current
+    for (const id of teamIdsToLoad) {
+      if (!bestCur.has(id) && bestPrev.has(id)) {
+        bestCur.set(id, bestPrev.get(id));
+      }
+    }
     for (const id of teamIdsToLoad) {
       const cur = bestCur.get(id);
       const prev = bestPrev.get(id);
@@ -1165,7 +1179,11 @@ export async function GET(req: Request) {
       )
   );
 
-  if (!hasCurrentSeasonEvidence) {
+  const teamHasCurrentSeasonData = [...allRowsByPlayer.values()].some(rows =>
+    rows.some((r: any) => Number(r.minutes ?? 0) > 0)
+  );
+
+  if (!hasCurrentSeasonEvidence && teamHasCurrentSeasonData) {
     importance = Math.min(importance, 10);
   }
 

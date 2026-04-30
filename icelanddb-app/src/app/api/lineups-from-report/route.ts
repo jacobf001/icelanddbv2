@@ -95,8 +95,10 @@ function parseAnchor($: cheerio.CheerioAPI, el: any): LineupPlayer | null {
 
   // Full name is in span with class containing "l:inline" (colon must be escaped)
   const fullName =
-    $a.find("span.l\\:inline").first().text().trim() ||
-    // fallback: second span after number
+    $a.find("span.body-4").filter((_i: number, el: any) => {
+      const cls = $(el).attr("class") ?? "";
+      return cls.includes("l:inline") && !cls.includes("hidden");
+    }).first().text().trim() ||
     $a.find("span").eq(1).text().trim() ||
     "";
 
@@ -159,36 +161,36 @@ export async function GET(req: Request) {
   const teams = parseTeamsFromHtml($);
 
   // This is the exact grid you pasted
-  const grid = $("div.grid.grid-cols-2").first();
-  if (!grid.length) {
+  // Find the match-report grid by data-panel attributes instead of grid class
+  const homePanels = $('[data-panel="home"]').filter((_i: number, el: any) => {
+    const cls = $(el).attr("class") ?? "";
+    return cls.includes("flex-col");
+  }).toArray();
+
+  const awayPanels = $('[data-panel="away"]').filter((_i: number, el: any) => {
+    const cls = $(el).attr("class") ?? "";
+    return cls.includes("flex-col");
+  }).toArray();
+
+  if (!homePanels.length || !awayPanels.length) {
     return NextResponse.json(
       { error: "Could not find the 2-col lineup grid", fetchUrl },
       { status: 200 },
     );
   }
 
-  // Children order (based on your pasted HTML):
-  // 0 home "Byrjunarlið" header
-  // 1 away "Byrjunarlið" header
-  // 2 home starters list (flex flex-col...)
-  // 3 away starters list
-  // 4 home "Varamenn" header
-  // 5 away "Varamenn" header
-  // 6 home bench list
-  // 7 away bench list
-  const children = grid.children().toArray();
-
-  const homeStartersEl = children[2];
-  const awayStartersEl = children[3];
-  const homeBenchEl = children[6];
-  const awayBenchEl = children[7];
+  const homeStartersEl = homePanels[0];
+  const awayStartersEl = awayPanels[0];
+  const homeBenchEl = homePanels[1];
+  const awayBenchEl = awayPanels[1];
 
   if (!homeStartersEl || !awayStartersEl) {
     return NextResponse.json(
       {
         error: "Grid did not contain expected starter blocks",
         fetchUrl,
-        childCount: children.length,
+        homePanelCount: homePanels.length,
+        awayPanelCount: awayPanels.length,
       },
       { status: 200 },
     );

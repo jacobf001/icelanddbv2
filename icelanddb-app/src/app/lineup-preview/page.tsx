@@ -46,7 +46,7 @@ type LineupStatsResponse = {
   recentAppearances: Record<string, RecentAppearanceRow[]>;
 };
 
-const SEASONS = [2020, 2021, 2022, 2023, 2024, 2025];
+const SEASONS = [2024, 2025, 2026];
 
 function cleanUrl(u: string) {
   return u.trim();
