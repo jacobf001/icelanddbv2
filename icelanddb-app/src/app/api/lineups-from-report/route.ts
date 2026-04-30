@@ -142,6 +142,11 @@ export async function GET(req: Request) {
   }
 
   const fetchUrl = withReportTab(safe.toString());
+
+  if (!process.env.SCRAPERAPI_KEY) {
+    return NextResponse.json({ error: "SCRAPERAPI_KEY not set" }, { status: 500 });
+  }
+
   const scrapeUrl = `http://api.scraperapi.com?api_key=${process.env.SCRAPERAPI_KEY}&url=${encodeURIComponent(fetchUrl)}`;
   const res = await fetch(scrapeUrl, { cache: "no-store" });
 
