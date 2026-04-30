@@ -142,25 +142,8 @@ export async function GET(req: Request) {
   }
 
   const fetchUrl = withReportTab(safe.toString());
-  const res = await fetch(fetchUrl, {
-    cache: "no-store",
-    headers: {
-      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-      "accept-language": "is-IS,is;q=0.9,en-US;q=0.8,en;q=0.7",
-      "accept-encoding": "gzip, deflate, br",
-      "cache-control": "no-cache",
-      "pragma": "no-cache",
-      "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-      "sec-ch-ua-mobile": "?0",
-      "sec-ch-ua-platform": '"Windows"',
-      "sec-fetch-dest": "document",
-      "sec-fetch-mode": "navigate",
-      "sec-fetch-site": "none",
-      "sec-fetch-user": "?1",
-      "upgrade-insecure-requests": "1",
-    },
-  });
+  const scrapeUrl = `http://api.scraperapi.com?api_key=${process.env.SCRAPERAPI_KEY}&url=${encodeURIComponent(fetchUrl)}`;
+  const res = await fetch(scrapeUrl, { cache: "no-store" });
 
   if (!res.ok) {
     return NextResponse.json({ error: `Fetch failed (${res.status})`, fetchUrl }, { status: 400 });
